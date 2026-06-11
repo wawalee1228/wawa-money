@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#1F2B28"/>
+  <text x="50%" y="52%" font-family="'Noto Serif TC', 'Songti TC', serif" font-size="220"
+        font-weight="600" fill="#F5F1E8" text-anchor="middle" dominant-baseline="central">W</text>
+  <text x="50%" y="80%" font-family="'Noto Serif TC', 'Songti TC', serif" font-size="60"
+        font-weight="500" fill="#C9B892" text-anchor="middle" dominant-baseline="central">記帳</text>
+</svg>

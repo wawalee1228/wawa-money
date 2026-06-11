@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1F2B28" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Wawa 記帳" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="css/style.css" />
+  <title>Wawa 記帳</title>
+</head>
+<body>
+  <header class="app-header">
+    <h1>Wawa 記帳</h1>
+    <span class="app-sub">地基版 · 餘額即時計算</span>
+  </header>
+
+  <main id="view" class="view"><!-- 各頁內容由 JS 注入 --></main>
+
+  <nav class="tabbar">
+    <button class="tab" data-view="overview">總覽</button>
+    <button class="tab" data-view="entry">記一筆</button>
+    <button class="tab" data-view="reconcile">對帳</button>
+    <button class="tab" data-view="list">明細</button>
+    <button class="tab" data-view="settings">設定</button>
+  </nav>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
