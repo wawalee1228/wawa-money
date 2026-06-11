@@ -1096,6 +1096,11 @@ export async function renderBatch(view) {
         const m = t.match(/借(?:給)?\s*([^\s$＄0-9，,＋+、｜]{1,6})/);
         if (m) draft.merchant = m[1];
       }
+      // 收入沒帶分類欄時 → 用整行做多欄位歸類（做客/額外收入/工作收入/營業→i1、先生薪水…→i2）
+      if (isHist && draft.type === 'income' && !draft.category_id) {
+        const cid = db.classifyIncomeSignal(t);
+        if (cid) { draft.category_id = cid; notes.push(`收入歸類（整行比對）→ ${cid}`); }
+      }
       drafts.push({ line: t, draft, notes });
     }
     if (box.querySelector('#bHist')?.checked) {
@@ -1851,8 +1856,10 @@ export async function renderSettings(view) {
   {
     const incomeCats = await db.metaGet('income_categories', []);
     const otherList = await db.metaGet('income_migrate_other', []);
+    const recat = await db.metaGet('income_recat_v11', null);
     const icCard = el(`<section class="card"><h2>收入分類（4 類）</h2>
-      <div class="note">類別固定四個（可改名）。「哥哥保管金」收入只加保管金餘額、不計入收入統計。</div></section>`);
+      <div class="note">類別固定四個（可改名）。「哥哥保管金」收入只加保管金餘額、不計入收入統計。</div>
+      ${recat ? `<div class="note">上次自動重歸結果：Wawa 營業 ${recat.i1} 筆／先生 ${recat.i2} 筆／保管金 ${recat.i3} 筆／留在其他 ${recat.kept_i4} 筆</div>` : ''}</section>`);
     incomeCats.forEach((c, idx) => {
       const row = el(`<div class="cat-edit"><span class="cat-id" style="flex:0 0 30px">${c.id}</span>
         <input data-f="name" value="${escapeHtml(c.name)}" />

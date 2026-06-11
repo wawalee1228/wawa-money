@@ -212,6 +212,55 @@ export async function ensureDefaults() {
   await backfillV8();
   await backfillV9();
   await backfillV10();
+  await backfillV11();
+}
+
+// 收入歸類（多欄位訊號共用函式）：merchant/項目/note/備註/原始行全部一起看。
+// 未來新資料（歷史匯入等）也用這一支，不再只看單一欄位。
+export function classifyIncomeSignal(sig) {
+  const s = sig || '';
+  if (/保管金/.test(s)) return 'i3';
+  if (/(做客|額外收入|工作收入|營業)/.test(s)) return 'i1';
+  if (/(先生薪水|先生收入|薪水)/.test(s)) return 'i2';
+  return null;
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v11：重歸「目前為 i4 其他／尚未歸類」的既有收入。
+// v10 的缺陷：她那批早期匯入的收入當時 merchant/import_line 都還是空的（v33 版未存
+// 項目欄），v10 看到空訊號全標 i4 後就不再重跑。v11 用「多欄位」重比對一次。
+// 只改收入分類欄；金額/日期/帳戶/鎖定狀態一律不動；逐筆寫變更紀錄。
+// ----------------------------------------------------------------------------
+export async function backfillV11() {
+  if (await metaGet('backfill_income_v11', false)) return;
+  const accs = await getAll('accounts');
+  const custodyIds = new Set(accs.filter((a) => a.custody).map((a) => a.id));
+  const txns = await getAll('transactions');
+  const other = [];
+  const counts = { i1: 0, i2: 0, i3: 0, kept_i4: 0 };
+  for (const t of txns) {
+    if (t.deleted || t.type !== 'income') continue;
+    const cur = t.category_id == null ? null : String(t.category_id);
+    if (cur && cur.startsWith('i') && cur !== 'i4') continue; // 已正確歸類者不動
+    const sig = [t.merchant, t.note, t.import_line, t.pending_reason].filter(Boolean).join(' ');
+    let cid = custodyIds.has(t.to_account_id) ? 'i3' : classifyIncomeSignal(sig);
+    if (!cid) {
+      cid = 'i4';
+      counts.kept_i4 += 1;
+      other.push({ id: t.id, date: t.date, amount: t.amount, hint: sig.trim().slice(0, 40) || '（無線索）' });
+    } else {
+      counts[cid] += 1;
+    }
+    if (String(t.category_id) !== cid) {
+      const before = { ...t };
+      t.category_id = cid;
+      await put('transactions', t);
+      await logChange({ ts: new Date().toISOString(), entity: 'transactions', entity_id: t.id, action: 'income_recategorize', before, after: { ...t }, note: `收入重歸類（多欄位比對）→ ${cid}` });
+    }
+  }
+  await metaSet('income_migrate_other', other);
+  await metaSet('income_recat_v11', counts);
+  await metaSet('backfill_income_v11', true);
 }
 
 // ----------------------------------------------------------------------------
