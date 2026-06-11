@@ -275,6 +275,16 @@ button.btn[disabled] { opacity: .4; }
 .tag-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
 .tag-row:last-child { border-bottom: 0; }
 
+/* 近期帳單（§11.2） */
+.bill-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.bill-row:last-child { border-bottom: 0; }
+.bill-check { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--green); }
+.bill-main { flex: 1; min-width: 0; }
+.bill-name { font-weight: 600; color: var(--ink); }
+.bill-row.done .bill-name { text-decoration: line-through; color: var(--muted); }
+.bill-row.done { opacity: .55; }
+.archived-dim { opacity: .55; }
+
 /* 應收清單（§B） */
 .recv-row { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-top: 10px; background: #FFFEFB; }
 .recv-main { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }

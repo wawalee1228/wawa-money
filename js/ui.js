@@ -43,8 +43,8 @@ export async function beginEdit(id) { editingId = id; navigate('entry'); }
 
 // ---------------------------------------------------------------- 總覽
 export async function renderOverview(view) {
-  const [accounts, txns, debts] = await Promise.all([
-    db.getAll('accounts'), db.getAll('transactions'), db.getAll('debts'),
+  const [accounts, txns, debts, bills] = await Promise.all([
+    db.getAll('accounts'), db.getAll('transactions'), db.getAll('debts'), db.getAll('bills'),
   ]);
   const active = accounts.filter((a) => !a.archived).sort((a, b) => (a.sort || 0) - (b.sort || 0));
   const assets = totalAssets(active, txns);
@@ -85,6 +85,114 @@ export async function renderOverview(view) {
   const rptBtn = el(`<div class="row" style="margin-bottom:16px"><button class="btn ghost" id="goReport">📊 看月報 / 報表</button></div>`);
   rptBtn.querySelector('#goReport').addEventListener('click', () => navigate('report'));
   view.appendChild(rptBtn);
+
+  // ===== 近期帳單卡（§11.2）：7 天內到期＋本月逾期未繳；勾掉＝本月完成，下月自動重來 =====
+  {
+    const activeBills = bills.filter((b) => b.status === 'active');
+    if (activeBills.length) {
+      const today = new Date();
+      const thisMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+      const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const dim = (y, m) => new Date(y, m + 1, 0).getDate();
+      const monthTotal = activeBills.reduce((s, b) => s + Number(b.amount || 0), 0);
+      const doneCnt = activeBills.filter((b) => b.done_month === thisMonth).length;
+
+      const rows = activeBills.map((b) => {
+        const done = b.done_month === thisMonth;
+        const dueThis = new Date(today.getFullYear(), today.getMonth(), Math.min(b.pay_day, dim(today.getFullYear(), today.getMonth())));
+        const overdue = !done && dueThis < startToday;
+        const due = (dueThis >= startToday || done || overdue) ? dueThis
+          : new Date(today.getFullYear(), today.getMonth() + 1, Math.min(b.pay_day, dim(today.getFullYear(), today.getMonth() + 1)));
+        const daysLeft = Math.round((due - startToday) / 86400000);
+        return { b, done, overdue, due, daysLeft };
+      }).filter((r) => r.done || r.overdue || r.daysLeft <= 7)
+        .sort((a, b2) => a.due - b2.due);
+
+      const card = el(`<section class="card"><h2>近期帳單（7 天內）</h2>
+        <div class="kv"><span class="name">本月固定支出總額</span><span class="amt">${money(monthTotal)}</span></div>
+        <div class="kv"><span class="name">本月已繳</span><span class="sub">${doneCnt} / ${activeBills.length} 筆</span></div></section>`);
+      if (!rows.length) card.appendChild(el('<div class="note">7 天內沒有要繳的帳單 ✓</div>'));
+      for (const r of rows) {
+        const when = r.done ? '本月已繳' : (r.overdue ? `<span style="color:var(--bad);font-weight:700">逾期 ${Math.round((startToday - r.due) / 86400000)} 天（${r.due.getMonth() + 1}/${r.due.getDate()}）</span>`
+          : (r.daysLeft === 0 ? '<b>今天到期</b>' : `${r.due.getMonth() + 1}/${r.due.getDate()}（${r.daysLeft} 天後）`));
+        const row = el(`<div class="bill-row ${r.done ? 'done' : ''}">
+          <input type="checkbox" class="bill-check" ${r.done ? 'checked' : ''}>
+          <span class="bill-main"><span class="bill-name">${escapeHtml(r.b.name)}</span><br><span class="txn-sub">${when}・${money(r.b.amount)}</span></span>
+          ${r.done ? '' : '<button class="btn sm" data-pay>記一筆</button>'}
+        </div>`);
+        row.querySelector('.bill-check').addEventListener('change', async (e) => {
+          const before = { ...r.b };
+          r.b.done_month = e.target.checked ? thisMonth : null;
+          await db.put('bills', r.b);
+          await db.logChange({ ts: nowISO(), entity: 'bills', entity_id: r.b.id, action: e.target.checked ? 'mark_paid' : 'unmark_paid', before, after: { ...r.b }, note: `帳單${e.target.checked ? '勾選已繳' : '取消已繳'}（${thisMonth}）` });
+          navigate('overview');
+        });
+        row.querySelector('[data-pay]')?.addEventListener('click', () => {
+          prefillDraft = {
+            type: 'expense', date: todayStr(), amount: r.b.amount,
+            from_account_id: r.b.from_account_id || null, to_account_id: null,
+            category_id: r.b.category_id ?? null, merchant: r.b.name,
+            debt_id: r.b.debt_id || null, party_tag: '', vehicle_tag: '',
+          };
+          clearEditing();
+          navigate('entry');
+        });
+        card.appendChild(row);
+      }
+      view.appendChild(card);
+    }
+  }
+
+  // ===== 負債卡（§2.5）：已知本金合計＋每月還款＋各筆（遠東房貸合併一組可展開）=====
+  {
+    const act = debts.filter((d) => d.status === 'active');
+    if (act.length) {
+      const knownTotal = act.reduce((s, d) => s + (d.remaining_principal != null ? Number(d.remaining_principal) : 0), 0);
+      const monthlyTotal = act.reduce((s, d) => s + Number(d.monthly_amount || 0), 0);
+      const pendCnt = act.filter((d) => d.remaining_principal == null).length;
+      const estPend = act.filter((d) => d.remaining_principal == null && d.remaining_terms != null)
+        .reduce((s, d) => s + Number(d.monthly_amount || 0) * Number(d.remaining_terms || 0), 0);
+
+      const dCard = el(`<section class="card"><h2>負債（§2.5）</h2>
+        <div class="kv"><span class="name">總負債（本金已知）</span><span class="amt neg">${money(knownTotal)}</span></div>
+        ${pendCnt ? `<div class="kv"><span class="name">本金待補 ${pendCnt} 筆（先以月付×期數估）</span><span class="sub">約 ${money(estPend)}（計入淨值）</span></div>` : ''}
+        <div class="kv"><span class="name">每月還款總額</span><span class="amt">${money(monthlyTotal)}</span></div></section>`);
+
+      const progress = (d) => d.total_terms != null && d.remaining_terms != null
+        ? `已還 ${d.total_terms - d.remaining_terms}/${d.total_terms} 期`
+        : (d.remaining_terms != null ? `剩 ${d.remaining_terms} 期` : '');
+      const debtRow = (d, indent) => el(`<div class="kv" ${indent ? 'style="padding-left:18px"' : ''}>
+        <span><span class="name">${escapeHtml(d.name)}</span><br><span class="sub">月付 ${money(d.monthly_amount)}・每月 ${d.pay_day} 日${progress(d) ? '・' + progress(d) : ''}${d.split_note || ''}</span></span>
+        <span class="amt ${d.remaining_principal != null ? 'neg' : ''}">${d.remaining_principal != null ? money(d.remaining_principal) : '本金待補'}</span></div>`);
+
+      // 分組：group 相同者合併一列，可展開
+      const groups = new Map();
+      for (const d of act) {
+        const key = d.group || '';
+        if (!key) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(d);
+      }
+      for (const [gname, list] of groups) {
+        if (list.length < 2) continue;
+        const gP = list.reduce((s, d) => s + (d.remaining_principal != null ? Number(d.remaining_principal) : 0), 0);
+        const gM = list.reduce((s, d) => s + Number(d.monthly_amount || 0), 0);
+        const head = el(`<div class="kv" style="cursor:pointer">
+          <span><span class="name">${escapeHtml(gname)}（${list.length} 段）<span class="collapse-chev" style="font-size:15px">+</span></span><br><span class="sub">月付合計 ${money(gM)}・每月 ${list[0].pay_day} 日</span></span>
+          <span class="amt neg">${money(gP)}</span></div>`);
+        const body = el('<div style="display:none"></div>');
+        for (const d of list) body.appendChild(debtRow(d, true));
+        head.addEventListener('click', () => {
+          const open = body.style.display === 'none';
+          body.style.display = open ? '' : 'none';
+          head.querySelector('.collapse-chev').textContent = open ? '−' : '+';
+        });
+        dCard.appendChild(head); dCard.appendChild(body);
+      }
+      for (const d of act) { if (!(d.group && (groups.get(d.group) || []).length >= 2)) dCard.appendChild(debtRow(d, false)); }
+      view.appendChild(dCard);
+    }
+  }
 
   const balances = allBalances(active.filter((a) => !a.custody), txns);
   const byOwner = {};
@@ -284,8 +392,8 @@ async function renderReportInner(view) {
       <div class="sum-item"><div class="sum-lab">結餘</div><div class="sum-val ${rep.net < 0 ? 'neg' : ''}">${money(rep.net)}</div></div>
     </div>
     <div class="kv"><span class="name">總資產（目前）</span><span class="amt">${money(assets)}</span></div>
-    ${nw.hasDebts ? `<div class="kv"><span class="name">淨值（總資產 − 負債）</span><span class="amt ${nw.net < 0 ? 'neg' : ''}">${money(nw.net)}</span></div>`
-      : `<div class="note">淨值：填了負債後顯示（總資產 − 負債餘額）。</div>`}
+    ${nw.hasDebts ? `<div class="kv"><span class="name">淨值（資產＋應收−負債）</span><span class="amt ${nw.net < 0 ? 'neg' : ''}">${money(nw.net)}</span></div>`
+      : `<div class="note">淨值：填了負債後顯示（資產＋應收−負債）。</div>`}
     <div class="note">收入/支出/結餘只算這個範圍；內部移動不計收支。${reportState.categoryId != null ? '（已篩分類）' : ''}${reportState.merchant ? '（已篩店家）' : ''}</div>
   </section>`));
 
@@ -358,6 +466,7 @@ export async function renderEntry(view) {
   const sourceDefaults = await db.metaGet('source_defaults', {});
   const storeCategoryMap = await db.metaGet('store_category_map', {});
   const keywordRules = await db.metaGet('keyword_category_rules', []);
+  const activeDebts = (await db.getAll('debts')).filter((d) => d.status === 'active');
 
   // 編輯（修正）模式：載入既有資料；或對帳帶進來的預填草稿（非編輯、視為新一筆）
   let rec = null;
@@ -421,6 +530,10 @@ export async function renderEntry(view) {
 
     <label class="field"><span class="lab">主分類（§4.1）</span>
       <select id="f_cat">${catOptions(rec?.category_id)}</select></label>
+
+    <label class="field"><span class="lab">關聯負債（繳貸款時選；本金會跟著遞減）</span>
+      <select id="f_debt"><option value="">—無—</option>
+      ${activeDebts.map((d) => `<option value="${d.id}" ${String(rec?.debt_id) === String(d.id) ? 'selected' : ''}>${escapeHtml(d.name)}（月付 ${money(d.monthly_amount)}）</option>`).join('')}</select></label>
 
     <div class="row">
       <label class="field"><span class="lab">對象標籤</span><select id="f_party">${tagOptions(partyTags, rec?.party_tag)}</select></label>
@@ -535,6 +648,7 @@ export async function renderEntry(view) {
       screenshot_id: rec?.screenshot_id || null,
       related_txn_id: rec?.related_txn_id || null,
       locked_at: rec?.locked_at || null,
+      debt_id: $('f_debt').value ? Number($('f_debt').value) : null,
     };
   }
 
@@ -564,7 +678,7 @@ export async function renderEntry(view) {
     const liveAsmp = {};
     if (assumptions.from_account_id && f.from_account_id) liveAsmp.from_account_id = assumptions.from_account_id;
     if (assumptions.to_account_id && f.to_account_id) liveAsmp.to_account_id = assumptions.to_account_id;
-    renderConfirmCard(confirmHost, f, issues, accounts, categories, isEdit, rec, liveAsmp);
+    renderConfirmCard(confirmHost, f, issues, accounts, categories, isEdit, rec, liveAsmp, activeDebts);
     confirmHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
@@ -572,7 +686,7 @@ export async function renderEntry(view) {
 }
 
 // 確認卡（§5、§6：顯示 日期＋星期幾＋地點＋項目＋金額＋付款來源；確認才寫入）
-function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, assumptions = {}) {
+function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, assumptions = {}, debts = []) {
   const acctName = (id) => accounts.find((a) => a.id === id)?.name || '（未選）';
   const catName = (id) => categories.find((c) => c.id === id)?.name || '（未分類）';
   const blocks = issues.filter((i) => i.level === 'block');
@@ -615,6 +729,30 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     card.appendChild(el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244">ℹ 付款來源是「${fromAcc.name}」：會扣保管金餘額並記在明細，但<b>不會</b>計入月報的支出與分類/4群統計。</div>`));
   }
 
+  // §2.5 負債繳款：本利拆分（已知利率自動估、可手動改；利率未知 → 全額暫不扣本金、標待拆）
+  const debt = f.debt_id ? debts.find((d) => d.id === f.debt_id) : null;
+  if (debt && f.type === 'expense' && f.amount) {
+    const amt = Number(f.amount);
+    let estI = '', estP = '', splitNote;
+    if (debt.rate != null && debt.remaining_principal != null) {
+      const i = Math.max(0, Math.round(Number(debt.remaining_principal) * Number(debt.rate) / 100 / 12));
+      estI = Math.min(i, amt); estP = Math.max(0, amt - estI);
+      splitNote = `依剩餘本金 ${money(debt.remaining_principal)} × 年利率 ${debt.rate}% ÷ 12 估算（可手動改）。本金部分會從這筆負債扣。`;
+    } else if (debt.remaining_principal != null) {
+      splitNote = '⚠ 利率未知：預設「全額暫不扣本金、標待拆」；你也可以手動填本金/利息。';
+    } else {
+      splitNote = 'ℹ 這筆負債本金待補：入帳只會把剩餘期數 −1，不動本金。';
+    }
+    card.appendChild(el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244" id="splitBox">
+      <b>繳「${escapeHtml(debt.name)}」— 本利拆分</b><br><span style="font-size:12.5px">${splitNote}</span>
+      <div class="row" style="margin-top:8px">
+        <label class="field" style="margin:0"><span class="lab">本金</span><input id="sp_p" type="number" inputmode="numeric" value="${estP}"></label>
+        <label class="field" style="margin:0"><span class="lab">利息/費用</span><input id="sp_i" type="number" inputmode="numeric" value="${estI}"></label>
+      </div>
+      ${debt.remaining_terms != null ? `<span style="font-size:12px">入帳後剩餘期數 ${debt.remaining_terms} → ${Math.max(0, debt.remaining_terms - 1)}</span>` : ''}
+    </div>`));
+  }
+
   // 段5-1：預設帶入的帳戶 → 在確認卡顯眼提示「我填了 X，對嗎？」（一眼確認）
   const asmpMsg = (f.type === 'income' || f.type === 'transfer') ? assumptions.to_account_id : assumptions.from_account_id;
   if (asmpMsg) {
@@ -631,7 +769,16 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
   const btns = el(`<div class="confirm-btns"></div>`);
   if (clean) {
     const ok = el(`<button class="btn">${isEdit ? '確認修正（上鎖）' : '確認入帳'}</button>`);
-    ok.addEventListener('click', () => saveRecord(f, issues, isEdit, rec, { forceLocked: isEdit }));
+    ok.addEventListener('click', () => {
+      // 讀本利拆分輸入（有 splitBox 才有）；都空＝未拆 → 標待拆（不扣本金）
+      const spP = card.querySelector('#sp_p'), spI = card.querySelector('#sp_i');
+      if (spP || spI) {
+        f.principal_part = spP && spP.value !== '' ? Number(spP.value) : null;
+        f.interest_part = spI && spI.value !== '' ? Number(spI.value) : null;
+        f.split_pending = (f.principal_part == null && debt && debt.remaining_principal != null);
+      }
+      saveRecord(f, issues, isEdit, rec, { forceLocked: isEdit });
+    });
     btns.appendChild(ok);
   } else {
     // 缺金額／缺來源都不能入帳，只能存草稿；標題依缺什麼而定
@@ -663,6 +810,22 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
   } else {
     const id = await db.add('transactions', record);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'create', before: null, after: { ...record, id }, note: '新增交易' });
+
+    // §2.5 負債繳款遞減：只在「新增且已確認」時套用一次（修正不重複扣，要調整去設定區改負債）。
+    // 本金：有拆出 principal_part 才扣；期數：有追蹤剩餘期數者一律 −1。
+    if (record.status === STATUS.CONFIRMED && record.debt_id) {
+      const d = await db.get('debts', record.debt_id);
+      if (d && d.status === 'active') {
+        const before = { ...d };
+        if (record.principal_part != null && d.remaining_principal != null) {
+          d.remaining_principal = Math.max(0, Number(d.remaining_principal) - Number(record.principal_part));
+        }
+        if (d.remaining_terms != null) d.remaining_terms = Math.max(0, Number(d.remaining_terms) - 1);
+        d.last_paid_at = ts;
+        await db.put('debts', d);
+        await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `繳款 ${money(record.amount)}（本金 ${record.principal_part != null ? money(record.principal_part) : '未拆'}${record.split_pending ? '・標待拆' : ''}）` });
+      }
+    }
   }
 
   // 段5-2：學習「店家 → 分類」。只從使用者確認/鎖定、且有店家+分類的交易學。
@@ -1643,6 +1806,112 @@ export async function renderSettings(view) {
   });
   kwCard.appendChild(kwAdd);
   view.appendChild(kwCard);
+
+  // 負債清單（§2.5/§12）：可增改、結清封存（封存保留紀錄不真刪）
+  {
+    const debts = await db.getAll('debts');
+    const accOpts = (sel) => `<option value="">—未指定—</option>` + accounts.filter((a) => !a.archived).map((a) => `<option value="${a.id}" ${String(sel) === String(a.id) ? 'selected' : ''}>${a.name}</option>`).join('');
+    const dCard = el(`<section class="card"><h2>負債清單（§2.5）</h2>
+      <div class="note">欄位可留空待補；「結清封存」會從活躍清單移除但保留紀錄。本金/期數可隨時手動校正。</div>
+      <div class="debt-list"></div>
+      <div class="add-row"><input id="dNew" placeholder="新負債名稱"><button class="btn sm" id="dAdd">新增</button></div></section>`);
+    const list = dCard.querySelector('.debt-list');
+    for (const d of debts) {
+      const row = el(`<div class="acct-edit ${d.status !== 'active' ? 'archived-dim' : ''}">
+        <div class="head"><span class="nm">${escapeHtml(d.name)}${d.status !== 'active' ? '（已結清封存）' : ''}</span><span class="owner-tag">${d.group ? '群組：' + escapeHtml(d.group) : ''}</span></div>
+        <div class="row">
+          <label class="field"><span class="lab">剩餘本金（空＝待補）</span><input data-f="p" type="number" inputmode="numeric" value="${d.remaining_principal ?? ''}"></label>
+          <label class="field"><span class="lab">年利率%（空＝未知）</span><input data-f="r" type="number" step="0.01" value="${d.rate ?? ''}"></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="lab">每月還款</span><input data-f="m" type="number" inputmode="numeric" value="${d.monthly_amount ?? ''}"></label>
+          <label class="field"><span class="lab">繳款日</span><input data-f="day" type="number" min="1" max="31" value="${d.pay_day ?? ''}"></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="lab">剩餘期數</span><input data-f="rt" type="number" value="${d.remaining_terms ?? ''}"></label>
+          <label class="field"><span class="lab">總期數</span><input data-f="tt" type="number" value="${d.total_terms ?? ''}"></label>
+        </div>
+        <label class="field"><span class="lab">出錢帳戶</span><select data-f="acc">${accOpts(d.from_account_id)}</select></label>
+        <label class="field"><span class="lab">備註</span><input data-f="note" value="${escapeHtml(d.note || '')}"></label>
+        <label class="inline-check field"><input data-f="arch" type="checkbox" ${d.status !== 'active' ? 'checked' : ''}> <span>結清封存</span></label>
+        <button class="btn sm" data-save>儲存這筆負債</button>
+      </div>`);
+      row.querySelector('[data-save]').addEventListener('click', async () => {
+        const before = { ...d };
+        const v = (s) => { const x = row.querySelector(`[data-f="${s}"]`).value; return x === '' ? null : Number(x); };
+        d.remaining_principal = v('p'); d.rate = v('r'); d.monthly_amount = v('m') ?? 0;
+        d.pay_day = v('day') ?? d.pay_day; d.remaining_terms = v('rt'); d.total_terms = v('tt');
+        d.from_account_id = row.querySelector('[data-f="acc"]').value ? Number(row.querySelector('[data-f="acc"]').value) : null;
+        d.note = row.querySelector('[data-f="note"]').value.trim();
+        d.status = row.querySelector('[data-f="arch"]').checked ? 'settled_archived' : 'active';
+        await db.put('debts', d);
+        await db.logChange({ ts: nowISO(), entity: 'debts', entity_id: d.id, action: 'update', before, after: { ...d }, note: '設定區手動修改負債' });
+        const btn = row.querySelector('[data-save]'); btn.textContent = '✓'; setTimeout(() => { btn.textContent = '儲存這筆負債'; }, 1200);
+      });
+      list.appendChild(row);
+    }
+    dCard.querySelector('#dAdd').addEventListener('click', async () => {
+      const name = dCard.querySelector('#dNew').value.trim();
+      if (!name) { alert('請輸入負債名稱'); return; }
+      const nd = { name, group: '', remaining_principal: null, rate: null, monthly_amount: 0, pay_day: 1, remaining_terms: null, total_terms: null, from_account_id: null, note: '', status: 'active' };
+      const id = await db.add('debts', nd);
+      await db.logChange({ ts: nowISO(), entity: 'debts', entity_id: id, action: 'create', before: null, after: { ...nd, id }, note: '新增負債' });
+      navigate('settings');
+    });
+    view.appendChild(dCard);
+  }
+
+  // 每月固定帳單（§11.2/§12）：可增改、封存
+  {
+    const bills = await db.getAll('bills');
+    const debts = (await db.getAll('debts')).filter((d) => d.status === 'active');
+    const accOpts = (sel) => `<option value="">—未指定—</option>` + accounts.filter((a) => !a.archived).map((a) => `<option value="${a.id}" ${String(sel) === String(a.id) ? 'selected' : ''}>${a.name}</option>`).join('');
+    const catOpts2 = (sel) => `<option value="">—未分類—</option>` + catsSorted(categories).map((c) => `<option value="${c.id}" ${String(sel) === String(c.id) ? 'selected' : ''}>${c.name}</option>`).join('');
+    const dOpts = (sel) => `<option value="">—無—</option>` + debts.map((d) => `<option value="${d.id}" ${String(sel) === String(d.id) ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
+    const bCard = el(`<section class="card"><h2>每月固定帳單（§11.2）</h2>
+      <div class="note">總覽會在到期前 7 天提醒；勾「已繳」＝本月完成，下月自動重來。</div>
+      <div class="bill-list"></div>
+      <div class="add-row"><input id="bNew" placeholder="新帳單名稱"><button class="btn sm" id="bAdd">新增</button></div></section>`);
+    const list = bCard.querySelector('.bill-list');
+    for (const b of bills) {
+      const row = el(`<div class="acct-edit ${b.status !== 'active' ? 'archived-dim' : ''}">
+        <div class="head"><span class="nm">${escapeHtml(b.name)}</span></div>
+        <div class="row">
+          <label class="field"><span class="lab">金額</span><input data-f="amt" type="number" inputmode="numeric" value="${b.amount ?? ''}"></label>
+          <label class="field"><span class="lab">每月幾日</span><input data-f="day" type="number" min="1" max="31" value="${b.pay_day ?? ''}"></label>
+        </div>
+        <label class="field"><span class="lab">付款來源</span><select data-f="acc">${accOpts(b.from_account_id)}</select></label>
+        <div class="row">
+          <label class="field"><span class="lab">分類</span><select data-f="cat">${catOpts2(b.category_id)}</select></label>
+          <label class="field"><span class="lab">關聯負債</span><select data-f="debt">${dOpts(b.debt_id)}</select></label>
+        </div>
+        <label class="inline-check field"><input data-f="arch" type="checkbox" ${b.status !== 'active' ? 'checked' : ''}> <span>封存（不再提醒）</span></label>
+        <button class="btn sm" data-save>儲存這筆帳單</button>
+      </div>`);
+      row.querySelector('[data-save]').addEventListener('click', async () => {
+        const before = { ...b };
+        b.amount = Number(row.querySelector('[data-f="amt"]').value || 0);
+        b.pay_day = Number(row.querySelector('[data-f="day"]').value || b.pay_day);
+        b.from_account_id = row.querySelector('[data-f="acc"]').value ? Number(row.querySelector('[data-f="acc"]').value) : null;
+        b.category_id = row.querySelector('[data-f="cat"]').value ? Number(row.querySelector('[data-f="cat"]').value) : null;
+        b.debt_id = row.querySelector('[data-f="debt"]').value ? Number(row.querySelector('[data-f="debt"]').value) : null;
+        b.status = row.querySelector('[data-f="arch"]').checked ? 'archived' : 'active';
+        await db.put('bills', b);
+        await db.logChange({ ts: nowISO(), entity: 'bills', entity_id: b.id, action: 'update', before, after: { ...b }, note: '設定區手動修改帳單' });
+        const btn = row.querySelector('[data-save]'); btn.textContent = '✓'; setTimeout(() => { btn.textContent = '儲存這筆帳單'; }, 1200);
+      });
+      list.appendChild(row);
+    }
+    bCard.querySelector('#bAdd').addEventListener('click', async () => {
+      const name = bCard.querySelector('#bNew').value.trim();
+      if (!name) { alert('請輸入帳單名稱'); return; }
+      const nb = { name, amount: 0, pay_day: 1, from_account_id: null, category_id: null, debt_id: null, status: 'active', done_month: null };
+      const id = await db.add('bills', nb);
+      await db.logChange({ ts: nowISO(), entity: 'bills', entity_id: id, action: 'create', before: null, after: { ...nb, id }, note: '新增帳單' });
+      navigate('settings');
+    });
+    view.appendChild(bCard);
+  }
 
   // 雲端備份（§10）
   const lastBackup = await db.metaGet('last_backup_at', null);

@@ -98,6 +98,11 @@ export function buildRecord(form, issues, nowISO, opts = {}) {
     invoice_no: form.invoice_no || null,      // 查重段使用
     screenshot_id: form.screenshot_id || null,
     related_txn_id: form.related_txn_id || null,
+    // §2.5 負債繳款：關聯負債＋本利拆分（利率未知未拆 → split_pending 標待拆）
+    debt_id: form.debt_id || null,
+    principal_part: form.principal_part != null && form.principal_part !== '' ? Number(form.principal_part) : null,
+    interest_part: form.interest_part != null && form.interest_part !== '' ? Number(form.interest_part) : null,
+    split_pending: !!form.split_pending,
     updated_at: nowISO,
     locked_at: status === STATUS.LOCKED ? nowISO : (form.locked_at || null),
   };
