@@ -886,10 +886,13 @@ async function commitHistorical(d, line) {
   return id;
 }
 
-// 歷史匯入查重：同日期＋同金額＋同類型的既有「歷史」筆 → 視為同一行重貼。
+// 歷史匯入查重（數量感知）：同日期＋同金額＋同類型的既有「歷史」筆 → 視為同一行重貼。
 // 既有缺分類且這次有 → 補分類；其他 → 略過不重複新增。
-function matchExistingHist(existing, d) {
+// ⚠ 每筆既有記錄一次只能對掉貼入的一筆（used 集合）：貼入 N 筆相同、庫裡只有 M 筆（M<N）
+//   → 前 M 筆對掉既有、其餘 N−M 筆照常新增，不會全部誤判重複（例：同日兩筆 $4,500 收入）。
+function matchExistingHist(existing, d, used) {
   return existing.find((x) => !x.deleted && x.historical
+    && !(used && used.has(x.id))
     && x.date === d.date && Number(x.amount) === Number(d.amount) && x.type === (d.type || 'expense'));
 }
 
@@ -903,14 +906,18 @@ async function renderHistPreview(out, drafts, skips, accounts, categories) {
 
   if (!ok.length && !dateless.length && !skips.length) { out.appendChild(el('<div class="note">沒有可解析的行。</div>')); return; }
 
-  // 查重 dry-run：算 新增 / 補分類 / 略過（同一批重貼不會重複）
+  // 查重 dry-run（數量感知）：每筆既有只能對掉貼入的一筆 → N 貼入、M 既有（M<N）會補新增 N−M 筆
   const existing = (await db.getAll('transactions')).filter((t) => !t.deleted && t.historical);
+  const usedDry = new Set();
   let willAdd = 0, willFill = 0, willSkip = 0;
   for (const d of ok) {
-    const m = matchExistingHist(existing, d.draft);
+    const m = matchExistingHist(existing, d.draft, usedDry);
     if (!m) willAdd++;
-    else if (m.category_id == null && d.draft.category_id != null) willFill++;
-    else willSkip++;
+    else {
+      usedDry.add(m.id);
+      if (m.category_id == null && d.draft.category_id != null) willFill++;
+      else willSkip++;
+    }
   }
 
   let inc = 0, exp = 0, recv = 0, moves = 0;
@@ -969,12 +976,14 @@ async function renderHistPreview(out, drafts, skips, accounts, categories) {
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.textContent = '匯入中…';
       let added = 0, filled = 0, skipped = 0;
+      // 配對池＝匯入前的既有歷史筆；本批新增「不」回流進池（同批 N 筆相同就要進 N 筆）
       const live = (await db.getAll('transactions')).filter((t) => !t.deleted && t.historical);
+      const usedIds = new Set();
       for (const d of ok) {
-        const m = matchExistingHist(live, d.draft);
+        const m = matchExistingHist(live, d.draft, usedIds);
+        if (m) usedIds.add(m.id);
         if (!m) {
-          const id = await commitHistorical(d.draft, d.line);
-          live.push({ ...d.draft, id, historical: true, type: d.draft.type || 'expense' });
+          await commitHistorical(d.draft, d.line);
           added++;
         } else if (m.category_id == null && d.draft.category_id != null) {
           const before = { ...m };
