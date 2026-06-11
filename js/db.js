@@ -211,6 +211,49 @@ export async function ensureDefaults() {
   await backfillV7();
   await backfillV8();
   await backfillV9();
+  await backfillV10();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v10：收入分類（固定四類 i1~i4，設定區可改名）＋既有收入自動歸類。
+// 支出分類、餘額邏輯、保管金邏輯都不動；保管金存入仍不計收入統計（i3 只是可選可篩）。
+// ----------------------------------------------------------------------------
+export async function backfillV10() {
+  if (await metaGet('backfill_seed_v10', false)) return;
+
+  if ((await metaGet('income_categories', null)) == null) {
+    await metaSet('income_categories', [
+      { id: 'i1', name: 'Wawa 營業收入' },
+      { id: 'i2', name: '先生收入' },
+      { id: 'i3', name: '哥哥保管金' },
+      { id: 'i4', name: '其他' },
+    ]);
+  }
+
+  // 既有收入歸類：看 店家/備註/原始匯入行 的關鍵字；對不上 → 其他（i4）並留清單給使用者看
+  const accs = await getAll('accounts');
+  const custodyIds = new Set(accs.filter((a) => a.custody).map((a) => a.id));
+  const txns = await getAll('transactions');
+  const other = [];
+  let migrated = 0;
+  for (const t of txns) {
+    if (t.deleted || t.type !== 'income') continue;
+    if (t.category_id != null && String(t.category_id).startsWith('i')) continue; // 已歸過
+    const sig = `${t.merchant || ''} ${t.note || ''} ${t.import_line || ''}`;
+    let cid;
+    if (custodyIds.has(t.to_account_id)) cid = 'i3';
+    else if (/(營業收入|做客|工作收入)/.test(sig)) cid = 'i1';
+    else if (/(先生薪水|先生收入)/.test(sig)) cid = 'i2';
+    else { cid = 'i4'; other.push({ id: t.id, date: t.date, amount: t.amount, hint: sig.trim().slice(0, 40) || '（無線索）' }); }
+    const before = { ...t };
+    t.category_id = cid;
+    await put('transactions', t);
+    migrated += 1;
+    await logChange({ ts: new Date().toISOString(), entity: 'transactions', entity_id: t.id, action: 'income_categorize', before, after: { ...t }, note: `收入自動歸類 → ${cid}` });
+  }
+  await metaSet('income_migrate_other', other);
+  await metaSet('income_migrate_count', migrated);
+  await metaSet('backfill_seed_v10', true);
 }
 
 // ----------------------------------------------------------------------------

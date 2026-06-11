@@ -34,12 +34,17 @@ export function computeReport(txns, accounts, categories, filters) {
   const catGroup = (id) => { const c = categories.find((x) => String(x.id) === String(id)); return c && c.group4 ? c.group4 : null; };
 
   const base = txns.filter((t) => !t.deleted && COUNTED.has(t.status) && t.date >= start && t.date <= end);
-  const filtered = base.filter((t) =>
-    (categoryId == null || String(t.category_id) === String(categoryId)) &&
-    (merchant == null || (t.merchant || '') === merchant));
+  // 分類篩選是「型別範圍」：選收入類（i 開頭）→ 只縮收入、支出照常；選支出類 → 只縮支出、收入照常
+  const isIncCat = categoryId != null && String(categoryId).startsWith('i');
+  const filtered = base.filter((t) => {
+    if (merchant != null && (t.merchant || '') !== merchant) return false;
+    if (categoryId == null) return true;
+    if (isIncCat) return t.type !== 'income' || String(t.category_id) === String(categoryId);
+    return t.type !== 'expense' || String(t.category_id) === String(categoryId);
+  });
 
   let income = 0, expense = 0, skipped = 0;
-  const catMap = new Map(), grpMap = new Map(), merMap = new Map();
+  const catMap = new Map(), grpMap = new Map(), merMap = new Map(), incMap = new Map();
   const flow = new Map();
   const addFlow = (id, key, amt) => { if (id == null) return; const f = flow.get(id) || { in: 0, out: 0 }; f[key] += amt; flow.set(id, f); };
   // 保管金帳戶（§B）：用它付＝扣保管金但「不算 Wawa 支出」；錢進它＝保管金增加但「不算收入」。
@@ -52,7 +57,11 @@ export function computeReport(txns, accounts, categories, filters) {
     if (!isFinite(amt)) { skipped++; continue; }
     if (t.type === 'income') {
       addFlow(t.to_account_id, 'in', amt);
-      if (!custodyIds.has(t.to_account_id)) income += amt; // 進保管金不算收入
+      if (!custodyIds.has(t.to_account_id)) { // 進保管金不算收入（i3 不會出現在統計）
+        income += amt;
+        const ik = t.category_id != null ? String(t.category_id) : 'i4';
+        incMap.set(ik, (incMap.get(ik) || 0) + amt);
+      }
     } else if (t.type === 'expense') {
       addFlow(t.from_account_id, 'out', amt);
       if (!custodyIds.has(t.from_account_id)) { // 保管金支出不入支出/分類/4群統計
@@ -85,5 +94,6 @@ export function computeReport(txns, accounts, categories, filters) {
     return { id, name: a ? a.name : `#${id}`, inflow: f.in, outflow: f.out, net: f.in - f.out };
   }).sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
 
-  return { income, expense, net: income - expense, byCategory, byGroup4, byMerchant, accountFlow, count: filtered.length, skipped };
+  const byIncomeCat = [...incMap].map(([id, amount]) => ({ id, amount })).sort((a, b) => b.amount - a.amount);
+  return { income, expense, net: income - expense, byCategory, byGroup4, byMerchant, byIncomeCat, accountFlow, count: filtered.length, skipped };
 }

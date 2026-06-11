@@ -123,7 +123,12 @@ export function scanMerchant(text, knownStores = []) {
 export function matchCategoryColumn(colText, categories) {
   const t = (colText || '').trim();
   if (!t) return null;
-  if (/收入/.test(t)) return { kind: 'income' };
+  if (/收入/.test(t)) {
+    // 收入子類（固定四類 i1~i4；i3 保管金走帳戶判定，不在這裡指）
+    if (/營業|做客|工作/.test(t)) return { kind: 'income', inc: 'i1' };
+    if (/先生/.test(t)) return { kind: 'income', inc: 'i2' };
+    return { kind: 'income', inc: 'i4' };
+  }
   if (/(應收|暫借)/.test(t)) return { kind: 'receivable' };
   for (const c of (categories || [])) {
     if (c && c.name && t.includes(c.name)) return { kind: 'cat', id: c.id };
@@ -487,6 +492,8 @@ export function parseText(text, ctx, base = new Date()) {
   if (colSpec && colSpec.kind === 'cat') {
     category_id = colSpec.id;
     notes.push(`分類：分類欄「${colText}」→ 直接對應（欄位優先，可改）`);
+  } else if (colSpec && colSpec.kind === 'income' && colSpec.inc) {
+    category_id = colSpec.inc; // 收入子類 i1/i2/i4
   } else if (colText && !colSpec) {
     notes.push(`分類欄「${colText}」對不上任何分類 → 照其他規則判（判不出就未分類）`);
   }

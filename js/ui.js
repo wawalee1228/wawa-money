@@ -322,25 +322,27 @@ export async function renderReport(view) {
 }
 
 async function renderReportInner(view) {
-  const [accountsAll, txns, categories, debts, g4names] = await Promise.all([
+  const [accountsAll, txns, categories, debts, g4names, incomeCats] = await Promise.all([
     db.getAll('accounts'), db.getAll('transactions'), db.metaGet('categories', []), db.getAll('debts'),
-    db.metaGet('group4_names', {}),
+    db.metaGet('group4_names', {}), db.metaGet('income_categories', []),
   ]);
+  const isIncFilter = reportState.categoryId != null && String(reportState.categoryId).startsWith('i');
   const active = accountsAll.filter((a) => !a.archived);
   const range = periodRange(reportState.kind, new Date(), reportState.custom);
   const rep = computeReport(txns, accountsAll, categories, { start: range.start, end: range.end, categoryId: reportState.categoryId, merchant: reportState.merchant });
   const nw = netWorth(active, txns, debts);
   const assets = totalAssets(active, txns);
-  const catName = (id) => categories.find((c) => String(c.id) === String(id))?.name || '';
+  const catName = (id) => [...categories, ...incomeCats].find((c) => String(c.id) === String(id))?.name || '';
+  const incName = (id) => incomeCats.find((c) => String(c.id) === String(id))?.name || '其他';
 
   // 期間內所有店家（給篩選下拉）
   const periodMerchants = [...new Set(txns
     .filter((t) => !t.deleted && t.type === 'expense' && t.date >= range.start && t.date <= range.end && t.merchant)
     .map((t) => t.merchant))].sort();
 
-  // 圖表的分解資料（圓餅＋長條共用）
+  // 圖表的分解資料（圓餅＋長條共用）。篩「收入類」只縮收入卡，支出圓餅照常。
   let slices, breakTitle;
-  if (reportState.categoryId != null) {
+  if (reportState.categoryId != null && !isIncFilter) {
     slices = rep.byMerchant.map((x) => ({ label: x.merchant, amount: x.amount }));
     breakTitle = `店家佔比（${catName(reportState.categoryId)}）`;
   } else if (reportState.dim === '4') {
@@ -371,7 +373,12 @@ async function renderReportInner(view) {
       <label class="field"><span class="lab">起</span><input id="cStart" type="date" value="${reportState.custom.start || range.start}"></label>
       <label class="field"><span class="lab">迄</span><input id="cEnd" type="date" value="${reportState.custom.end || range.end}"></label></div>` : ''}
     <label class="field"><span class="lab">只看某分類</span><select id="fCat"><option value="">全部分類</option>
-      ${catsSorted(categories).map((c) => `<option value="${c.id}" ${String(reportState.categoryId) === String(c.id) ? 'selected' : ''}>${c.name}</option>`).join('')}</select></label>
+      <optgroup label="收入類">
+      ${incomeCats.map((c) => `<option value="${c.id}" ${String(reportState.categoryId) === String(c.id) ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+      </optgroup>
+      <optgroup label="支出類">
+      ${catsSorted(categories).map((c) => `<option value="${c.id}" ${String(reportState.categoryId) === String(c.id) ? 'selected' : ''}>${c.name}</option>`).join('')}
+      </optgroup></select></label>
     <label class="field"><span class="lab">只看某店家</span><select id="fMer"><option value="">全部店家</option>
       ${periodMerchants.map((m) => `<option value="${escapeHtml(m)}" ${reportState.merchant === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>
   </section>`);
@@ -380,7 +387,12 @@ async function renderReportInner(view) {
     filt.querySelector('#cStart')?.addEventListener('change', (e) => { reportState.custom.start = e.target.value; renderReport(view); });
     filt.querySelector('#cEnd')?.addEventListener('change', (e) => { reportState.custom.end = e.target.value; renderReport(view); });
   }
-  filt.querySelector('#fCat').addEventListener('change', (e) => { reportState.categoryId = e.target.value ? Number(e.target.value) : null; reportState.merchant = null; renderReport(view); });
+  filt.querySelector('#fCat').addEventListener('change', (e) => {
+    const v = e.target.value;
+    reportState.categoryId = v ? (String(v).startsWith('i') ? v : Number(v)) : null;
+    reportState.merchant = null;
+    renderReport(view);
+  });
   filt.querySelector('#fMer').addEventListener('change', (e) => { reportState.merchant = e.target.value || null; renderReport(view); });
   view.appendChild(filt);
 
@@ -391,6 +403,7 @@ async function renderReportInner(view) {
       <div class="sum-item"><div class="sum-lab">支出</div><div class="sum-val neg">${money(rep.expense)}</div></div>
       <div class="sum-item"><div class="sum-lab">結餘</div><div class="sum-val ${rep.net < 0 ? 'neg' : ''}">${money(rep.net)}</div></div>
     </div>
+    ${(rep.byIncomeCat || []).filter((x) => x.amount > 0).length ? `<div class="note" style="text-align:center">收入拆分：${rep.byIncomeCat.filter((x) => x.amount > 0).map((x) => `${escapeHtml(incName(x.id))} ${money(x.amount)}`).join('／')}</div>` : ''}
     <div class="kv"><span class="name">總資產（目前）</span><span class="amt">${money(assets)}</span></div>
     ${nw.hasDebts ? `<div class="kv"><span class="name">淨值（資產＋應收−負債）</span><span class="amt ${nw.net < 0 ? 'neg' : ''}">${money(nw.net)}</span></div>`
       : `<div class="note">淨值：填了負債後顯示（資產＋應收−負債）。</div>`}
@@ -422,14 +435,14 @@ async function renderReportInner(view) {
 
   // ---- 圓餅 ----
   const pieCard = el(`<section class="card"><h2>${breakTitle}</h2>
-    ${reportState.categoryId == null ? `<div class="seg" id="dimSeg" style="max-width:240px">
+    ${(reportState.categoryId == null || isIncFilter) ? `<div class="seg" id="dimSeg" style="max-width:240px">
       <button type="button" class="seg-btn ${reportState.dim === '12' ? 'on' : ''}" data-d="12">${categories.length} 類</button>
       <button type="button" class="seg-btn ${reportState.dim === '4' ? 'on' : ''}" data-d="4">4 群</button></div>` : ''}
     <div class="pie-wrap">${pieSVG(slices)}</div>
     <div class="note" id="pieDetail">點圓餅或下方項目看金額與占比。</div>
     <div id="pieLegend"></div>
   </section>`);
-  if (reportState.categoryId == null) pieCard.querySelectorAll('#dimSeg .seg-btn').forEach((b) => b.addEventListener('click', () => { reportState.dim = b.dataset.d; renderReport(view); }));
+  if (reportState.categoryId == null || isIncFilter) pieCard.querySelectorAll('#dimSeg .seg-btn').forEach((b) => b.addEventListener('click', () => { reportState.dim = b.dataset.d; renderReport(view); }));
   const legend = pieCard.querySelector('#pieLegend');
   const detail = pieCard.querySelector('#pieDetail');
   const showDetail = (i) => { const s = slices[i]; const pct = totalExp ? Math.round(s.amount / totalExp * 100) : 0; detail.innerHTML = `<b style="color:${s.color}">${escapeHtml(s.label)}</b>：${money(s.amount)}（${pct}%）`; };
@@ -467,6 +480,7 @@ export async function renderEntry(view) {
   const storeCategoryMap = await db.metaGet('store_category_map', {});
   const keywordRules = await db.metaGet('keyword_category_rules', []);
   const activeDebts = (await db.getAll('debts')).filter((d) => d.status === 'active');
+  const incomeCats = await db.metaGet('income_categories', []);
 
   // 編輯（修正）模式：載入既有資料；或對帳帶進來的預填草稿（非編輯、視為新一筆）
   let rec = null;
@@ -478,6 +492,8 @@ export async function renderEntry(view) {
     accounts.map((a) => `<option value="${a.id}" ${String(sel) === String(a.id) ? 'selected' : ''}>${a.name}（${OWNER_LABEL[a.owner] || ''}）</option>`).join('');
   const catOptions = (sel) => `<option value="">—未分類—</option>` +
     catsSorted(categories).map((c) => `<option value="${c.id}" ${String(sel) === String(c.id) ? 'selected' : ''}>${c.name}</option>`).join('');
+  const incCatOptions = (sel) => `<option value="">—未分類—</option>` +
+    incomeCats.map((c) => `<option value="${c.id}" ${String(sel) === String(c.id) ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
   const tagOptions = (arr, sel) => `<option value="">—無—</option>` +
     arr.map((t) => `<option value="${t}" ${sel === t ? 'selected' : ''}>${t}</option>`).join('');
 
@@ -528,8 +544,8 @@ export async function renderEntry(view) {
     <label class="field" id="wrap_to"><span class="lab" id="lab_to">收款 / 目標帳戶</span>
       <select id="f_to">${acctOptions(rec?.to_account_id)}</select></label>
 
-    <label class="field"><span class="lab">主分類（§4.1）</span>
-      <select id="f_cat">${catOptions(rec?.category_id)}</select></label>
+    <label class="field"><span class="lab" id="lab_cat">主分類（§4.1）</span>
+      <select id="f_cat">${curType === 'income' ? incCatOptions(rec?.category_id) : catOptions(rec?.category_id)}</select></label>
 
     <label class="field"><span class="lab">關聯負債（繳貸款時選；本金會跟著遞減）</span>
       <select id="f_debt"><option value="">—無—</option>
@@ -558,7 +574,11 @@ export async function renderEntry(view) {
   // --- 互動 ---
   let typeNow = curType;
   let assumptions = {};  // 解析時「預設帶入、需你確認」的欄位
+  // 分類下拉依型別切換時各自記住的選擇
+  let lastExpCat = curType === 'income' ? '' : String(rec?.category_id ?? '');
+  let lastIncCat = curType === 'income' ? String(rec?.category_id ?? '') : '';
   const $ = (id) => form.querySelector('#' + id);
+  if (curType === 'income') $('f_cat').dataset.mode = 'income';
 
   // 使用者手動改了帳戶選擇 → 該欄位的「預設假設」即失效（不再提示）
   ['f_from', 'f_to'].forEach((fid) => {
@@ -576,6 +596,16 @@ export async function renderEntry(view) {
     $('lab_to').textContent = typeNow === 'transfer' ? '搬進哪個帳戶' : (typeNow === 'income' ? '錢進哪個帳戶' : '目標帳戶');
     const mLab = form.querySelector('#f_merchant')?.closest('label')?.querySelector('.lab');
     if (mLab) mLab.textContent = typeNow === 'receivable' ? '借給誰（建議填，應收清單會顯示）' : '地點 / 店家（選填，沒有就留空）';
+    // 收入 ↔ 支出切換時換分類清單（各自記住上次選擇）
+    const catSel = $('f_cat');
+    const wantIncome = typeNow === 'income';
+    const isIncomeNow = catSel.dataset.mode === 'income';
+    if (wantIncome !== isIncomeNow) {
+      if (isIncomeNow) lastIncCat = catSel.value; else lastExpCat = catSel.value;
+      catSel.innerHTML = wantIncome ? incCatOptions(lastIncCat) : catOptions(lastExpCat);
+      catSel.dataset.mode = wantIncome ? 'income' : 'expense';
+      $('lab_cat').textContent = wantIncome ? '收入分類' : '主分類（§4.1）';
+    }
   }
   function refreshWeekday() {
     const d = $('f_date').value;
@@ -638,7 +668,7 @@ export async function renderEntry(view) {
       amount: $('f_amount').value,
       from_account_id: $('f_from').value ? Number($('f_from').value) : null,
       to_account_id: $('f_to').value ? Number($('f_to').value) : null,
-      category_id: $('f_cat').value ? Number($('f_cat').value) : null,
+      category_id: $('f_cat').value ? (String($('f_cat').value).startsWith('i') ? $('f_cat').value : Number($('f_cat').value)) : null,
       party_tag: $('f_party').value,
       vehicle_tag: $('f_vehicle').value,
       merchant: $('f_merchant').value,
@@ -678,7 +708,7 @@ export async function renderEntry(view) {
     const liveAsmp = {};
     if (assumptions.from_account_id && f.from_account_id) liveAsmp.from_account_id = assumptions.from_account_id;
     if (assumptions.to_account_id && f.to_account_id) liveAsmp.to_account_id = assumptions.to_account_id;
-    renderConfirmCard(confirmHost, f, issues, accounts, categories, isEdit, rec, liveAsmp, activeDebts);
+    renderConfirmCard(confirmHost, f, issues, accounts, [...categories, ...incomeCats], isEdit, rec, liveAsmp, activeDebts);
     confirmHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
@@ -1340,11 +1370,12 @@ async function verifyTxn(id, recon, reason) {
 
 // ---------------------------------------------------------------- 明細
 export async function renderList(view) {
-  const [allTxns, accounts, categories] = await Promise.all([
-    db.getAll('transactions'), db.getAll('accounts'), db.metaGet('categories', []),
+  const [allTxns, accounts, categories, incomeCats] = await Promise.all([
+    db.getAll('transactions'), db.getAll('accounts'), db.metaGet('categories', []), db.metaGet('income_categories', []),
   ]);
+  const allCats = [...categories, ...incomeCats];
   const acctName = (id) => accounts.find((a) => a.id === id)?.name || '?';
-  const catName = (id) => categories.find((c) => c.id === id)?.name || '未分類';
+  const catName = (id) => allCats.find((c) => String(c.id) === String(id))?.name || '未分類';
   const sortFn = (a, b) => (b.date || '').localeCompare(a.date || '') || (b.created_at || '').localeCompare(a.created_at || '');
 
   const txns = allTxns.filter((t) => !t.deleted).sort(sortFn);
@@ -1815,6 +1846,34 @@ export async function renderSettings(view) {
   });
   kwCard.appendChild(kwAdd);
   view.appendChild(kwCard);
+
+  // 收入分類（固定四類，可改名；i3 保管金只是可選可篩，存入仍不計收入統計）
+  {
+    const incomeCats = await db.metaGet('income_categories', []);
+    const otherList = await db.metaGet('income_migrate_other', []);
+    const icCard = el(`<section class="card"><h2>收入分類（4 類）</h2>
+      <div class="note">類別固定四個（可改名）。「哥哥保管金」收入只加保管金餘額、不計入收入統計。</div></section>`);
+    incomeCats.forEach((c, idx) => {
+      const row = el(`<div class="cat-edit"><span class="cat-id" style="flex:0 0 30px">${c.id}</span>
+        <input data-f="name" value="${escapeHtml(c.name)}" />
+        <button class="btn sm" data-save>存</button></div>`);
+      row.querySelector('[data-save]').addEventListener('click', async () => {
+        const before = { ...c };
+        const v = row.querySelector('[data-f="name"]').value.trim();
+        if (v) c.name = v;
+        await db.metaSet('income_categories', incomeCats);
+        await db.logChange({ ts: nowISO(), entity: 'income_categories', entity_id: c.id, action: 'rename', before, after: { ...c }, note: '改收入分類名稱' });
+        const btn = row.querySelector('[data-save]'); btn.textContent = '✓'; setTimeout(() => { btn.textContent = '存'; }, 1200);
+      });
+      icCard.appendChild(row);
+    });
+    if (otherList.length) {
+      icCard.appendChild(el(`<div class="group-title">自動歸到「其他」的既有收入（${otherList.length} 筆，請確認）</div>`));
+      for (const o of otherList) icCard.appendChild(el(`<div class="kv"><span class="name">${o.date}　${money(o.amount)}</span><span class="sub">${escapeHtml(o.hint)}</span></div>`));
+      icCard.appendChild(el(`<div class="note">不對的話到「明細」按該筆「修正」，收入分類下拉改選正確類別即可。</div>`));
+    }
+    view.appendChild(icCard);
+  }
 
   // 負債清單（§2.5/§12）：可增改、結清封存（封存保留紀錄不真刪）
   {
