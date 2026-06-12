@@ -1,7 +1,9 @@
 // ============================================================================
 // app.js — 啟動與分頁切換
 // ============================================================================
-import { ensureSeeded, ensureDefaults } from './db.js';
+import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
+
+const APP_VERSION = 'v41-fix12';
 import {
   renderOverview, renderReport, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing,
@@ -38,9 +40,16 @@ tabs.forEach((t) => t.addEventListener('click', () => {
 
 (async function boot() {
   try {
+    console.log(`[Wawa] App ${APP_VERSION} 啟動中…（若這行沒出現＝你載入的是舊版，請重整 1-2 次）`);
     const didSeed = await ensureSeeded();
     if (didSeed) console.log('[Wawa] 已種子化結構資料（帳戶/卡/分類/標籤），餘額皆 0。');
-    await ensureDefaults(); // 已種子化的舊資料庫補上新設定（預設來源、店家分類記憶表）
+    await ensureDefaults(); // 已種子化的舊資料庫補上新設定＋所有 backfill（含 v12 收入修正）
+    // 診斷：收入修正狀況
+    const fix12 = await metaGet('income_fix_v12', null);
+    const incTx = (await getAll('transactions')).filter((t) => !t.deleted && t.type === 'income');
+    const i4cnt = incTx.filter((t) => t.category_id === 'i4').length;
+    const nonecnt = incTx.filter((t) => t.category_id == null).length;
+    console.log('[Wawa] 收入診斷：', { v12: fix12, 收入總筆數: incTx.length, 仍在其他i4: i4cnt, 仍未分類None: nonecnt });
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;

@@ -213,6 +213,51 @@ export async function ensureDefaults() {
   await backfillV9();
   await backfillV10();
   await backfillV11();
+  await backfillV12();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v12：五月 11 筆「死資料」收入（merchant/note/import_line 全空、
+// 訊號歸類對不上）→ 用使用者提供的「指定清單」依 (日期+金額) 唯一對應直接寫入。
+// 候選：type=income 且未歸好（category_id 為 None 或 i4）；逐筆配對、每筆只用一次。
+// 只改 category_id（指定值）與空的 merchant；不動金額/日期/帳戶/type/鎖定；逐筆寫紀錄。
+// 強制跑一次（全新旗標 → 必執行）；重跑時因已歸類不符候選條件而自然冪等。
+// ----------------------------------------------------------------------------
+export async function backfillV12() {
+  if (await metaGet('backfill_income_fix_v12', false)) return;
+  const TARGETS = [
+    ['2026-05-02', 4500, 'i1', '做客收入'],
+    ['2026-05-10', 4000, 'i1', '額外收入'],
+    ['2026-05-11', 4800, 'i1', '做客收入'],
+    ['2026-05-15', 3500, 'i1', '做客收入'],
+    ['2026-05-15', 8700, 'i1', '做客收入(晚上)'],
+    ['2026-05-21', 1380, 'i1', '做客收入'],
+    ['2026-05-22', 4500, 'i1', '做客收入'],
+    ['2026-05-26', 4500, 'i1', '做客收入'],
+    ['2026-05-28', 2800, 'i1', '工作收入'],
+    ['2026-05-30', 4500, 'i1', '做客收入'],
+    ['2026-05-15', 104000, 'i2', '先生薪水'],
+  ];
+  const txns = await getAll('transactions');
+  const cand = txns.filter((t) => !t.deleted && t.type === 'income'
+    && (t.category_id == null || t.category_id === 'i4'));
+  const used = new Set();
+  let fixed = 0;
+  const misses = [];
+  for (const [date, amount, cid, name] of TARGETS) {
+    const t = cand.find((x) => !used.has(x.id) && x.date === date && Number(x.amount) === Number(amount));
+    if (!t) { misses.push(`${date}/${amount}`); continue; }
+    used.add(t.id);
+    const before = { ...t };
+    t.category_id = cid;
+    if (!t.merchant) t.merchant = name;
+    await put('transactions', t);
+    fixed += 1;
+    await logChange({ ts: new Date().toISOString(), entity: 'transactions', entity_id: t.id, action: 'income_fix_list', before, after: { ...t }, note: `五月收入指定清單修正 → ${cid}（${name}）` });
+  }
+  await metaSet('income_fix_v12', { fixed, misses });
+  await metaSet('backfill_income_fix_v12', true);
+  if (typeof console !== 'undefined') console.log(`[Wawa] backfill v12：五月收入指定清單修正 ${fixed} 筆，漏 ${misses.length}`, misses);
 }
 
 // 收入歸類（多欄位訊號共用函式）：merchant/項目/note/備註/原始行全部一起看。

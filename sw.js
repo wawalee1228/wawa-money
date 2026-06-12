@@ -3,7 +3,7 @@
 // 策略：預先快取殼層檔；資料完全存 IndexedDB，不經過這裡。
 // 改版時把 CACHE 版本號 +1 即可讓使用者拿到新檔。
 // ============================================================================
-const CACHE = 'wawa-shell-v40';
+const CACHE = 'wawa-shell-v41';
 const SHELL = [
   './',
   './index.html',
