@@ -75,6 +75,8 @@ body {
 @media (min-width: 1320px) {
   .view { max-width: 1320px; column-count: 3; }
 }
+/* 含長列表的頁（明細/對帳）強制單欄滿版：多欄會把超高卡片裁切只露幾列 */
+.view.view-single { column-count: 1; max-width: 820px; }
 /* 超寬時讓底部分頁列也置中，不要無限拉開 */
 @media (min-width: 900px) {
   .tabbar { padding-left: max(0px, calc((100vw - 1040px) / 2)); padding-right: max(0px, calc((100vw - 1040px) / 2)); }

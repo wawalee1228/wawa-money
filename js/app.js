@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v48-search';
+const APP_VERSION = 'v49-list';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -20,6 +20,8 @@ async function show(name) {
     || (name === 'batch' && t.dataset.view === 'entry')
     || (name === 'report' && t.dataset.view === 'overview')
     || (name === 'calc' && t.dataset.view === 'overview')));
+  // 含長列表的頁強制單欄滿版（明細/對帳）——多欄會把超高卡片裁切
+  view.classList.toggle('view-single', name === 'list' || name === 'reconcile');
   window.scrollTo(0, 0);
   if (name === 'overview') await renderOverview(view);
   else if (name === 'report') await renderReport(view);
