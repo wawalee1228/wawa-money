@@ -30,6 +30,55 @@ function transferLabel(t, accounts) {
   return '帳戶間轉帳';
 }
 
+// 搜尋用：寬鬆正規化（小寫＋全形英數轉半形）
+function normSearch(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/[Ａ-Ｚａ-ｚ０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+}
+
+// 內部移動帳戶顯示（依附轉帳沿用、單邊、全空→帳戶未指定）
+function transferSrcDisplay(t, accounts, txById) {
+  let from = t.from_account_id, to = t.to_account_id;
+  if ((from == null || to == null) && t.related_txn_id != null && txById) {
+    const p = txById.get(t.related_txn_id);
+    if (p) { if (from == null) from = p.from_account_id; if (to == null) to = p.to_account_id; }
+  }
+  const nm = (id) => accounts.find((a) => a.id === id)?.name || '?';
+  if (from != null && to != null) return `${nm(from)} → ${nm(to)}`;
+  if (from != null) return `${nm(from)} 轉出`;
+  if (to != null) return `轉入 ${nm(to)}`;
+  return '（帳戶未指定）';
+}
+
+// 一筆交易的摘要列內容（.txn-main）——明細與對帳搜尋共用
+function txnSummaryHTML(t, accounts, allCats, txById) {
+  const catName = (id) => allCats.find((c) => String(c.id) === String(id))?.name || '未分類';
+  const acctName = (id) => accounts.find((a) => a.id === id)?.name || '?';
+  const sign = (t.type === 'expense' || t.type === 'receivable') ? '-' : (t.type === 'income' ? '+' : '⇄ ');
+  const cls = (t.type === 'expense' || t.type === 'receivable') ? 'neg' : (t.type === 'income' ? 'pos' : '');
+  const src = t.type === 'income' ? `→ ${acctName(t.to_account_id)}`
+    : t.type === 'transfer' ? transferSrcDisplay(t, accounts, txById)
+    : `${acctName(t.from_account_id)}`;
+  const catShow = t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id);
+  const title = t.merchant || catShow || TXTYPE_LABEL[t.type];
+  const tags = [t.party_tag, t.vehicle_tag].filter(Boolean).join('・');
+  const recvTag = t.type !== 'receivable' ? '' : (t.settled ? '・<span style="color:var(--ok)">已收回</span>' : '・<span style="color:var(--bad);font-weight:700">待收款</span>');
+  const histTag = t.historical ? '・<span style="color:var(--muted)">歷史/不影響餘額</span>' : '';
+  return `<div class="txn-main">
+      <div class="txn-top"><span class="txn-title">${escapeHtml(title)}</span>
+        <span class="amt ${cls}">${sign}${money(t.amount).replace('-', '')}</span></div>
+      <div class="txn-sub">${formatWithWeekday(t.date)}・${TXTYPE_LABEL[t.type]}・${escapeHtml(src)}</div>
+      <div class="txn-sub">${escapeHtml(catShow)}${tags ? '・' + escapeHtml(tags) : ''}${t.verified ? '・<span style="color:var(--ok)">✅已驗證</span>' : ''}${recvTag}${histTag}</div>
+    </div>`;
+}
+
+// 一筆交易的可搜尋文字（項目/店家/備註/金額/分類名/帳戶名）
+function txnSearchText(t, accounts, allCats) {
+  const catName = (id) => allCats.find((c) => String(c.id) === String(id))?.name || '';
+  const acctName = (id) => accounts.find((a) => a.id === id)?.name || '';
+  return normSearch([t.merchant, t.note, t.import_line, t.amount, catName(t.category_id),
+    acctName(t.from_account_id), acctName(t.to_account_id), TXTYPE_LABEL[t.type]].filter((x) => x != null && x !== '').join(' '));
+}
+
 function money(n) {
   if (n == null || n === '') return '—';
   const v = Math.round(Number(n || 0));
@@ -52,6 +101,8 @@ export function clearListAnchor() { listAnchorId = null; listAnchorScrollY = 0; 
 let prefillDraft = null;
 // 明細頁篩選：'all' | 'todo'（只看待補/待確認草稿）
 let listFilter = 'all';
+// 明細搜尋關鍵字（即時過濾）
+let listSearchKw = '';
 export function clearEditing() { editingId = null; }
 export async function beginEdit(id) { editingId = id; listAnchorId = id; listAnchorScrollY = window.scrollY || 0; navigate('entry'); }
 
@@ -96,8 +147,11 @@ export async function renderOverview(view) {
       : `<div class="note">（尚未填負債，淨值＝總資產；填了負債後這裡會出現淨值）</div>`}
   </section>`));
 
-  const rptBtn = el(`<div class="row" style="margin-bottom:16px"><button class="btn ghost" id="goReport">📊 看月報 / 報表</button></div>`);
+  const rptBtn = el(`<div class="row" style="margin-bottom:16px;gap:10px">
+    <button class="btn ghost" id="goReport">📊 看月報 / 報表</button>
+    <button class="btn ghost" id="goCalc">🧮 計算機 / 篩選加總</button></div>`);
   rptBtn.querySelector('#goReport').addEventListener('click', () => navigate('report'));
+  rptBtn.querySelector('#goCalc').addEventListener('click', () => navigate('calc'));
   view.appendChild(rptBtn);
 
   // ===== 近期帳單卡（§11.2）：7 天內到期＋本月逾期未繳；勾掉＝本月完成，下月自動重來 =====
@@ -280,6 +334,8 @@ export async function renderOverview(view) {
 // ---------------------------------------------------------------- 報表 / 月報（§11.1）
 // 報表頁狀態（重整報表頁時保留）
 let reportState = { kind: 'thisMonth', custom: { start: '', end: '' }, dim: '12', categoryId: null, merchant: null };
+// 計算機狀態（自由區間＋複選分類＋複選店家）
+let calcState = { start: '', end: '', cats: new Set(), merchants: new Set() };
 // 圖表配色：深綠／香檳金／中性色階，不用彩虹
 const RPAL = ['#1F2B28', '#4F6B52', '#B8954A', '#7A8F84', '#C9B892', '#566B62', '#A99C82', '#9A5B4C', '#6E6450', '#8C8A7E', '#3A4A44', '#DCCDA8'];
 
@@ -481,6 +537,86 @@ async function renderReportInner(view) {
       <span class="sub"><span class="pos">+${money(f.inflow)}</span> / <span class="neg">-${money(f.outflow)}</span> / <b class="${f.net < 0 ? 'neg' : 'pos'}">${f.net < 0 ? '' : '+'}${money(f.net)}</b></span></div>`));
   }
   view.appendChild(afCard);
+}
+
+// ---------------------------------------------------------------- 計算機 / 篩選加總（純查詢）
+export async function renderCalc(view) {
+  const [accounts, txns, categories, incomeCats] = await Promise.all([
+    db.getAll('accounts'), db.getAll('transactions'), db.metaGet('categories', []), db.metaGet('income_categories', []),
+  ]);
+  const COUNTED = new Set(['confirmed', 'locked', 'await_match']);
+  const base = txns.filter((t) => !t.deleted && COUNTED.has(t.status));
+  // 預設區間：本月
+  if (!calcState.start || !calcState.end) {
+    const now = new Date(); const p = (x) => String(x).padStart(2, '0');
+    calcState.start = `${now.getFullYear()}-${p(now.getMonth() + 1)}-01`;
+    calcState.end = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate())}`;
+  }
+  const merchants = [...new Set(base.filter((t) => t.merchant).map((t) => t.merchant))].sort();
+
+  view.innerHTML = '';
+  const back = el(`<div class="row" style="margin-bottom:12px"><button class="btn ghost" id="calcBack">← 回總覽</button></div>`);
+  back.querySelector('#calcBack').addEventListener('click', () => navigate('overview'));
+  view.appendChild(back);
+
+  // 區間
+  view.appendChild(el(`<section class="card"><h2>計算機 / 篩選加總（純查詢，不影響餘額）</h2>
+    <div class="row">
+      <label class="field"><span class="lab">開始日</span><input id="cStart" type="date" value="${calcState.start}"></label>
+      <label class="field"><span class="lab">結束日</span><input id="cEnd" type="date" value="${calcState.end}"></label>
+    </div></section>`));
+
+  // 分類複選（收入類/支出類分組）
+  const catCard = el(`<section class="card"><h2>分類（複選；不勾＝全部）</h2>
+    <div class="group-title">收入類</div><div class="chk-grid" id="incChks"></div>
+    <div class="group-title">支出類</div><div class="chk-grid" id="expChks"></div></section>`);
+  const mkChk = (id, name) => {
+    const c = el(`<label class="chk"><input type="checkbox" value="${id}" ${calcState.cats.has(String(id)) ? 'checked' : ''}> <span>${escapeHtml(name)}</span></label>`);
+    c.querySelector('input').addEventListener('change', (e) => { e.target.checked ? calcState.cats.add(String(id)) : calcState.cats.delete(String(id)); recompute(); });
+    return c;
+  };
+  incomeCats.forEach((c) => catCard.querySelector('#incChks').appendChild(mkChk(c.id, c.name)));
+  catsSorted(categories).forEach((c) => catCard.querySelector('#expChks').appendChild(mkChk(c.id, c.name)));
+  view.appendChild(catCard);
+
+  // 店家複選
+  const merCard = el(`<section class="card"><h2>店家（複選；不勾＝全部）</h2><div class="chk-grid scroll" id="merChks"></div></section>`);
+  if (!merchants.length) merCard.querySelector('#merChks').appendChild(el('<div class="note">沒有店家資料。</div>'));
+  merchants.forEach((m) => {
+    const c = el(`<label class="chk"><input type="checkbox" value="${escapeHtml(m)}" ${calcState.merchants.has(m) ? 'checked' : ''}> <span>${escapeHtml(m)}</span></label>`);
+    c.querySelector('input').addEventListener('change', (e) => { e.target.checked ? calcState.merchants.add(m) : calcState.merchants.delete(m); recompute(); });
+    merCard.querySelector('#merChks').appendChild(c);
+  });
+  view.appendChild(merCard);
+
+  // 即時加總結果
+  const resCard = el(`<section class="card" style="border-color:var(--gold)"><h2>加總結果（即時）</h2><div id="calcResult"></div></section>`);
+  view.appendChild(resCard);
+
+  function recompute() {
+    const f = base.filter((t) => {
+      if (t.date < calcState.start || t.date > calcState.end) return false;
+      if (calcState.cats.size && !calcState.cats.has(String(t.category_id))) return false;
+      if (calcState.merchants.size && !calcState.merchants.has(t.merchant || '')) return false;
+      return true;
+    });
+    let inc = 0, exp = 0, incN = 0, expN = 0;
+    for (const t of f) {
+      const a = Number(t.amount || 0);
+      if (t.type === 'income') { inc += a; incN += 1; }
+      else if (t.type === 'expense') { exp += a; expN += 1; }
+    }
+    const r = resCard.querySelector('#calcResult');
+    r.innerHTML = `
+      <div class="kv"><span class="name">符合筆數</span><span class="amt">${f.length} 筆</span></div>
+      ${incN ? `<div class="kv"><span class="name">收入加總（${incN} 筆）</span><span class="amt pos">${money(inc)}</span></div>` : ''}
+      ${expN ? `<div class="kv"><span class="name">支出加總（${expN} 筆）</span><span class="amt neg">${money(exp)}</span></div>` : ''}
+      ${(incN && expN) ? `<div class="kv"><span class="name">收−支</span><span class="amt ${inc - exp < 0 ? 'neg' : ''}">${money(inc - exp)}</span></div>` : ''}
+      <div class="note">區間 ${calcState.start} ~ ${calcState.end}${calcState.cats.size ? '・已篩 ' + calcState.cats.size + ' 個分類' : ''}${calcState.merchants.size ? '・已篩 ' + calcState.merchants.size + ' 個店家' : ''}。內部移動/應收不計收支。</div>`;
+  }
+  view.querySelector('#cStart').addEventListener('change', (e) => { calcState.start = e.target.value; recompute(); });
+  view.querySelector('#cEnd').addEventListener('change', (e) => { calcState.end = e.target.value; recompute(); });
+  recompute();
 }
 
 // ---------------------------------------------------------------- 記一筆（輸入 → 確認卡 → 上鎖）
@@ -1232,6 +1368,34 @@ export async function renderReconcile(view) {
   const result = el(`<div id="rcResult"></div>`);
   view.appendChild(result);
 
+  // 對帳輔助：搜尋既有交易（即時過濾，點列看詳情）——幫忙人工核對
+  const [rcAccounts, rcAllTxns, rcCats, rcIncCats] = await Promise.all([
+    db.getAll('accounts'), db.getAll('transactions'), db.metaGet('categories', []), db.metaGet('income_categories', []),
+  ]);
+  const rcCatsAll = [...rcCats, ...rcIncCats];
+  const rcById = new Map(rcAllTxns.map((t) => [t.id, t]));
+  const rcLive = rcAllTxns.filter((t) => !t.deleted).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const searchCard = el(`<section class="card"><h2>搜尋既有交易（核對用）</h2>
+    <div class="search-row"><input id="rcSearch" placeholder="🔍 搜尋項目/店家/備註/金額/分類/帳戶" />
+      <span class="search-count" id="rcSearchCount"></span></div>
+    <div id="rcSearchList"></div></section>`);
+  view.appendChild(searchCard);
+  const rcListEl = searchCard.querySelector('#rcSearchList');
+  const rcRender = (kw) => {
+    rcListEl.innerHTML = '';
+    const k = normSearch(kw);
+    if (!k) { searchCard.querySelector('#rcSearchCount').textContent = '輸入關鍵字搜尋'; return; }
+    const hits = rcLive.filter((t) => txnSearchText(t, rcAccounts, rcCatsAll).includes(k)).slice(0, 50);
+    searchCard.querySelector('#rcSearchCount').textContent = `符合 ${hits.length} 筆${hits.length >= 50 ? '（只列前 50）' : ''}`;
+    for (const t of hits) {
+      const row = el(`<div class="txn">${txnSummaryHTML(t, rcAccounts, rcCatsAll, rcById)}<div class="txn-side"><span class="badge b-${t.status}">${STATUS_LABEL[t.status]}</span></div></div>`);
+      row.querySelector('.txn-main').addEventListener('click', () => beginEdit(t.id));
+      rcListEl.appendChild(row);
+    }
+  };
+  searchCard.querySelector('#rcSearch').addEventListener('input', (e) => rcRender(e.target.value));
+  rcRender('');
+
   box.querySelector('#rcGo').addEventListener('click', async () => {
     const raw = box.querySelector('#rcText').value.trim();
     if (!raw) return;
@@ -1437,42 +1601,22 @@ export async function renderList(view) {
   const selected = new Set();
   const txById = new Map(allTxns.map((t) => [t.id, t]));
 
-  // 內部移動的帳戶顯示：依附轉帳→沿用其來源/目標；單邊→顯示單邊；全空→「帳戶未指定」（不再 ?-?）
-  function transferSrc(t) {
-    let from = t.from_account_id, to = t.to_account_id;
-    if ((from == null || to == null) && t.related_txn_id != null) {
-      const p = txById.get(t.related_txn_id);
-      if (p) { if (from == null) from = p.from_account_id; if (to == null) to = p.to_account_id; }
-    }
-    if (from != null && to != null) return `${acctName(from)} → ${acctName(to)}`;
-    if (from != null) return `${acctName(from)} 轉出`;
-    if (to != null) return `轉入 ${acctName(to)}`;
-    return '（帳戶未指定）';
-  }
-
-  // 一筆交易摘要列（可複用於正常 / 已刪除）
+  // 一筆交易摘要列（明細與已刪除共用；委派給共用函式，再補 pending_reason）
   function rowSummary(t) {
-    const sign = (t.type === 'expense' || t.type === 'receivable') ? '-' : (t.type === 'income' ? '+' : '⇄ ');
-    const cls = (t.type === 'expense' || t.type === 'receivable') ? 'neg' : (t.type === 'income' ? 'pos' : '');
-    const src = t.type === 'income' ? `→ ${acctName(t.to_account_id)}`
-      : t.type === 'transfer' ? transferSrc(t)
-      : `${acctName(t.from_account_id)}`;
-    const title = t.merchant || (t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id)) || TXTYPE_LABEL[t.type];
-    const tags = [t.party_tag, t.vehicle_tag].filter(Boolean).join('・');
-    const recvTag = t.type !== 'receivable' ? ''
-      : (t.settled ? '・<span style="color:var(--ok)">已收回</span>' : '・<span style="color:var(--bad);font-weight:700">待收款</span>');
-    const histTag = t.historical ? '・<span style="color:var(--muted)">歷史/不影響餘額</span>' : '';
-    return `<div class="txn-main">
-        <div class="txn-top"><span class="txn-title">${title}</span>
-          <span class="amt ${cls}">${sign}${money(t.amount).replace('-', '')}</span></div>
-        <div class="txn-sub">${formatWithWeekday(t.date)}・${TXTYPE_LABEL[t.type]}・${src}</div>
-        <div class="txn-sub">${t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id)}${tags ? '・' + tags : ''}${t.verified ? '・<span style="color:var(--ok)">✅已驗證</span>' : ''}${recvTag}${histTag}</div>
-        ${t.pending_reason ? `<div class="txn-warn">${t.pending_reason}</div>` : ''}
-      </div>`;
+    const inner = txnSummaryHTML(t, accounts, allCats, txById);
+    if (!t.pending_reason) return inner;
+    return inner.replace(/<\/div>\s*$/, `<div class="txn-warn">${escapeHtml(t.pending_reason)}</div></div>`);
   }
 
   // ---- 正常交易 ----
   if (displayed.length) {
+    // 搜尋框（即時過濾：項目/店家/備註/金額/分類/帳戶；可清空、寬鬆比對）
+    const searchBox = el(`<div class="search-row">
+      <input id="listSearch" placeholder="🔍 搜尋項目/店家/備註/金額/分類/帳戶" value="${escapeHtml(listSearchKw)}" />
+      <button class="btn sm ghost" id="listSearchClear">清空</button>
+      <span class="search-count" id="listSearchCount"></span></div>`);
+    view.appendChild(searchBox);
+
     const toolbar = el(`<div class="list-toolbar">
       <label class="inline-check"><input type="checkbox" id="selAll"> <span>全選</span></label>
       <span style="display:flex;gap:6px">
@@ -1493,7 +1637,7 @@ export async function renderList(view) {
       dup.disabled = n < 2;
     };
     for (const t of displayed) {
-      const row = el(`<div class="txn" id="txnrow-${t.id}">
+      const row = el(`<div class="txn" id="txnrow-${t.id}" data-search="${escapeHtml(txnSearchText(t, accounts, allCats))}">
         <input type="checkbox" class="txn-check" data-id="${t.id}">
         ${rowSummary(t)}
         <div class="txn-side">
@@ -1511,6 +1655,23 @@ export async function renderList(view) {
       sec.appendChild(row);
     }
     view.appendChild(sec);
+
+    // 即時搜尋：hide/show 現有列（保留焦點、保留卡樣式與點列看詳情）
+    const applySearch = () => {
+      const kw = normSearch(listSearchKw);
+      let shown = 0;
+      sec.querySelectorAll('.txn').forEach((r) => {
+        const hit = !kw || (r.dataset.search || '').includes(kw);
+        r.style.display = hit ? '' : 'none';
+        if (hit) shown += 1;
+      });
+      const cnt = searchBox.querySelector('#listSearchCount');
+      cnt.textContent = kw ? `符合 ${shown} 筆` : '';
+    };
+    const si = searchBox.querySelector('#listSearch');
+    si.addEventListener('input', () => { listSearchKw = si.value; applySearch(); });
+    searchBox.querySelector('#listSearchClear').addEventListener('click', () => { listSearchKw = ''; si.value = ''; applySearch(); si.focus(); });
+    applySearch();
 
     // 從詳情/修正返回時，捲回剛剛那一筆（保留位置；手機與電腦皆可）。
     // 先還原當時的捲動位置（編輯不改變列數，最準）；再 scrollIntoView 對齊那一筆當保險。

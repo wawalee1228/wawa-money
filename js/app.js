@@ -3,9 +3,9 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v47-detail';
+const APP_VERSION = 'v48-search';
 import {
-  renderOverview, renderReport, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
+  renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
 } from './ui.js';
 
@@ -18,10 +18,12 @@ async function show(name) {
   tabs.forEach((t) => t.classList.toggle('active', t.dataset.view === name
     || (name === 'selftest' && t.dataset.view === 'settings')
     || (name === 'batch' && t.dataset.view === 'entry')
-    || (name === 'report' && t.dataset.view === 'overview')));
+    || (name === 'report' && t.dataset.view === 'overview')
+    || (name === 'calc' && t.dataset.view === 'overview')));
   window.scrollTo(0, 0);
   if (name === 'overview') await renderOverview(view);
   else if (name === 'report') await renderReport(view);
+  else if (name === 'calc') await renderCalc(view);
   else if (name === 'entry') await renderEntry(view);
   else if (name === 'batch') await renderBatch(view);
   else if (name === 'reconcile') await renderReconcile(view);

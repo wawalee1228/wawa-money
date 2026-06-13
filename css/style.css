@@ -275,6 +275,18 @@ button.btn[disabled] { opacity: .4; }
 .tag-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
 .tag-row:last-child { border-bottom: 0; }
 
+/* 搜尋框（明細/對帳） */
+.search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.search-row input { flex: 1; }
+.search-row .btn { flex: 0 0 auto; }
+.search-count { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+/* 計算機複選 */
+.chk-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.chk-grid.scroll { max-height: 220px; overflow-y: auto; padding: 4px; border: 1px solid var(--line); border-radius: 10px; }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; background: #FAF7F0; border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+.chk input { width: auto; }
+
 /* 近期帳單（§11.2） */
 .bill-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .bill-row:last-child { border-bottom: 0; }
