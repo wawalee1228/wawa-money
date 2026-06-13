@@ -216,6 +216,68 @@ export async function ensureDefaults() {
   await backfillV12();
   await backfillV13();
   await backfillV14();
+  await backfillV15();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v15：餘額校正（使用者手動編輯弄亂期初/歷史標記後的一次性歸正）。
+// 步驟一：date <= 2026-06-10 的交易一律 historical=true（不影響餘額；仍留統計）。
+// 步驟二：強制重設各帳戶期初餘額＝6/10 基準可用餘額（覆寫被改亂的值）。
+// 步驟三：6/11 起的交易不動其 historical 標記，照常參與餘額（餘額=期初+6/11起非歷史淨額）。
+// 不刪交易、不改金額；只改 historical 標記與期初餘額；逐筆寫變更紀錄。
+// 安全網：動手前先把目前 transactions 快照 dump 到 console。
+// ----------------------------------------------------------------------------
+export async function backfillV15() {
+  if (await metaGet('balance_correction_v15', false)) return;
+  const TS = '2026-06-14';
+  const CUTOFF = '2026-06-10'; // 字串比較對 ISO 'YYYY-MM-DD' 安全
+
+  const txns = await getAll('transactions');
+  // 安全網：校正前完整快照（以防萬一可從 console 還原）
+  if (typeof console !== 'undefined') {
+    console.log(`[Wawa] === 餘額校正 v15：交易快照（校正前，共 ${txns.length} 筆）===`);
+    console.log(JSON.stringify(txns));
+  }
+
+  // 步驟一：6/10(含)以前全部歸歷史
+  let markedHistorical = 0;
+  for (const t of txns) {
+    if (t.deleted) continue; // 軟刪除維持原狀，不動
+    if (String(t.date) <= CUTOFF && !t.historical) {
+      const before = { historical: t.historical || false };
+      t.historical = true;
+      t.updated_at = TS;
+      await put('transactions', t);
+      markedHistorical += 1;
+      await logChange({ ts: TS, entity: 'transactions', entity_id: t.id, action: 'mark_historical', before, after: { historical: true }, note: '餘額校正 v15：6/10(含)前一律歸歷史，不影響餘額（仍留統計）' });
+    }
+  }
+
+  // 步驟二：強制重設期初餘額＝6/10 基準（沿用 v8 的關鍵字比對；這裡覆寫，不論現值）
+  const initMap = [
+    ['Wawa 中國信託', 25653], ['Wawa 玉山', 39994], ['Wawa 郵局', 17749], ['Wawa 身上現金', 3957],
+    ['LINE Pay Money', 13], ['一卡通', 33],
+    ['先生 中信', 48087], ['先生 玉山', 20409], ['先生 身上現金', 0],
+    ['哥哥保管金', 4100],
+  ];
+  const accs = await getAll('accounts');
+  let openingReset = 0;
+  const misses = [];
+  for (const [kw, val] of initMap) {
+    const a = accs.find((x) => x.name.includes(kw));
+    if (!a) { misses.push(kw); continue; }
+    if (Number(a.opening_balance || 0) !== val) {
+      const before = { opening_balance: a.opening_balance };
+      a.opening_balance = val;
+      await put('accounts', a);
+      openingReset += 1;
+      await logChange({ ts: TS, entity: 'accounts', entity_id: a.id, action: 'reset_opening', before, after: { opening_balance: val }, note: '餘額校正 v15：期初拉回 6/10 基準可用餘額' });
+    }
+  }
+
+  const result = { markedHistorical, openingReset, misses, ts: TS };
+  await metaSet('balance_correction_v15', result);
+  if (typeof console !== 'undefined') console.log('[Wawa] 餘額校正 v15 完成：', result);
 }
 
 // ----------------------------------------------------------------------------

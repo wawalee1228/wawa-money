@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v49-list';
+const APP_VERSION = 'v50-balfix';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -57,6 +57,7 @@ tabs.forEach((t) => t.addEventListener('click', () => {
     const nonecnt = incTx.filter((t) => t.category_id == null).length;
     console.log('[Wawa] 收入診斷：', { v12: fix12, 收入總筆數: incTx.length, 仍在其他i4: i4cnt, 仍未分類None: nonecnt });
     console.log('[Wawa] 撥款 v13：', await metaGet('loan_v13_result', null));
+    console.log('[Wawa] 餘額校正 v15：', await metaGet('balance_correction_v15', null));
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;
