@@ -29,6 +29,13 @@ export function scanDate(text, base = new Date()) {
     const mo = +m[1], d = +m[2];
     if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return { date: pad(base.getFullYear(), mo, d), matched: m[0], how: '明確日期（補今年）' };
   }
+  // 明確：M/D（斜線，如 6/11）→ 補系統當年、本地時間直接組字串（不經 UTC、不 ±1）。
+  // 用「前面是開頭或非數字/斜線/連字號」避免吃到 YYYY-MM-DD 的片段；不依賴 lookbehind（相容舊 iOS）。
+  m = s.match(/(?:^|[^\d/.\-])(\d{1,2})\s*\/\s*(\d{1,2})(?![\d/])/);
+  if (m) {
+    const mo = +m[1], d = +m[2];
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return { date: pad(base.getFullYear(), mo, d), matched: `${mo}/${d}`, how: 'M/D（補今年、本地）' };
+  }
   // 相對日期：先把可能的相對片語掃出來，再交給 date.js 換算
   const relRe = /(大前天|前天|昨天|今天|本日|今日|大後天|後天|明天|明日|(?:上|這|本|下)(?:週|周|禮拜|星期)[一二三四五六日天末]|(?:\d+|[零一二兩三四五六七八九十]+)(?:天|日)前|前(?:\d+|[零一二兩三四五六七八九十]+)(?:天|日)|(?:\d+|[零一二兩三四五六七八九十]+)(?:天|日)後|後(?:\d+|[零一二兩三四五六七八九十]+)(?:天|日))/;
   m = s.match(relRe);
