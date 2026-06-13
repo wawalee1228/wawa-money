@@ -3,10 +3,10 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v45-item';
+const APP_VERSION = 'v47-detail';
 import {
   renderOverview, renderReport, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
-  setNavigate, clearEditing,
+  setNavigate, clearEditing, clearListAnchor,
 } from './ui.js';
 
 const view = document.getElementById('view');
@@ -35,6 +35,8 @@ setNavigate(show);
 tabs.forEach((t) => t.addEventListener('click', () => {
   // 從分頁列點「記一筆」一律是新增（清掉修正狀態）
   if (t.dataset.view === 'entry') clearEditing();
+  // 直接點「明細」分頁＝回到頂部（清掉詳情返回的捲動錨點）
+  if (t.dataset.view === 'list') clearListAnchor();
   show(t.dataset.view);
 }));
 

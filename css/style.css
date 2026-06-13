@@ -225,7 +225,7 @@ button.btn[disabled] { opacity: .4; }
 /* 交易列 */
 .txn { display: flex; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .txn:last-child { border-bottom: 0; }
-.txn-main { flex: 1; min-width: 0; }
+.txn-main { flex: 1; min-width: 0; cursor: pointer; }
 .txn-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
 .txn-title { font-weight: 600; color: var(--ink); }
 .txn .amt { font-size: 16px; font-weight: 600; }

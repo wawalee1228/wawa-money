@@ -44,12 +44,16 @@ export function setNavigate(fn) { navigate = fn; }
 
 // 「修正」用的編輯狀態
 let editingId = null;
+// 明細→看詳情/修正→返回時，捲回剛剛那一筆（保留位置）
+let listAnchorId = null;
+let listAnchorScrollY = 0;
+export function clearListAnchor() { listAnchorId = null; listAnchorScrollY = 0; }
 // 對帳「可能漏記 → 記一筆」帶進記一筆頁的預填草稿（一次性）
 let prefillDraft = null;
 // 明細頁篩選：'all' | 'todo'（只看待補/待確認草稿）
 let listFilter = 'all';
 export function clearEditing() { editingId = null; }
-export async function beginEdit(id) { editingId = id; navigate('entry'); }
+export async function beginEdit(id) { editingId = id; listAnchorId = id; listAnchorScrollY = window.scrollY || 0; navigate('entry'); }
 
 // ---------------------------------------------------------------- 總覽
 export async function renderOverview(view) {
@@ -517,9 +521,11 @@ export async function renderEntry(view) {
   }
 
   if (isEdit) {
+    const backRow = el(`<div class="row" style="margin-bottom:10px"><button class="btn ghost" id="backToList">← 返回明細</button></div>`);
+    backRow.querySelector('#backToList').addEventListener('click', () => { clearEditing(); navigate('list'); });
+    view.appendChild(backRow);
     const prot = isProtected(rec.status);
-    view.appendChild(el(`<div class="warnbox">修正模式：你正在改第 #${rec.id} 筆（目前狀態：${STATUS_LABEL[rec.status]}）。
-      ${prot ? '這筆已受保護，只有你手動修改才會變動；' : ''}存檔後會標記為「已鎖定」（§5 修正即上鎖）。</div>`));
+    view.appendChild(el(`<div class="warnbox">這一筆 #${rec.id}（目前狀態：${STATUS_LABEL[rec.status]}）的詳情。改了欄位按下方「確認修正」才會變動${prot ? '；這筆已受保護，只有你手動改才會動' : ''}。看完直接按上面「← 返回明細」即可。</div>`));
   }
 
   const form = el(`<section class="card">
@@ -1429,13 +1435,27 @@ export async function renderList(view) {
 
   const displayed = listFilter === 'todo' ? pendingTxns : txns;
   const selected = new Set();
+  const txById = new Map(allTxns.map((t) => [t.id, t]));
+
+  // 內部移動的帳戶顯示：依附轉帳→沿用其來源/目標；單邊→顯示單邊；全空→「帳戶未指定」（不再 ?-?）
+  function transferSrc(t) {
+    let from = t.from_account_id, to = t.to_account_id;
+    if ((from == null || to == null) && t.related_txn_id != null) {
+      const p = txById.get(t.related_txn_id);
+      if (p) { if (from == null) from = p.from_account_id; if (to == null) to = p.to_account_id; }
+    }
+    if (from != null && to != null) return `${acctName(from)} → ${acctName(to)}`;
+    if (from != null) return `${acctName(from)} 轉出`;
+    if (to != null) return `轉入 ${acctName(to)}`;
+    return '（帳戶未指定）';
+  }
 
   // 一筆交易摘要列（可複用於正常 / 已刪除）
   function rowSummary(t) {
     const sign = (t.type === 'expense' || t.type === 'receivable') ? '-' : (t.type === 'income' ? '+' : '⇄ ');
     const cls = (t.type === 'expense' || t.type === 'receivable') ? 'neg' : (t.type === 'income' ? 'pos' : '');
     const src = t.type === 'income' ? `→ ${acctName(t.to_account_id)}`
-      : t.type === 'transfer' ? `${acctName(t.from_account_id)} → ${acctName(t.to_account_id)}`
+      : t.type === 'transfer' ? transferSrc(t)
       : `${acctName(t.from_account_id)}`;
     const title = t.merchant || (t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id)) || TXTYPE_LABEL[t.type];
     const tags = [t.party_tag, t.vehicle_tag].filter(Boolean).join('・');
@@ -1473,7 +1493,7 @@ export async function renderList(view) {
       dup.disabled = n < 2;
     };
     for (const t of displayed) {
-      const row = el(`<div class="txn">
+      const row = el(`<div class="txn" id="txnrow-${t.id}">
         <input type="checkbox" class="txn-check" data-id="${t.id}">
         ${rowSummary(t)}
         <div class="txn-side">
@@ -1484,11 +1504,26 @@ export async function renderList(view) {
       </div>`);
       row.querySelector('[data-edit]').addEventListener('click', () => beginEdit(t.id));
       row.querySelector('[data-del]').addEventListener('click', () => confirmDelete([t.id]));
+      // 點整列（避開勾選框/按鈕）= 看詳情/修正
+      row.querySelector('.txn-main').addEventListener('click', () => beginEdit(t.id));
       const cb = row.querySelector('.txn-check');
       cb.addEventListener('change', () => { cb.checked ? selected.add(t.id) : selected.delete(t.id); updateToolbar(); });
       sec.appendChild(row);
     }
     view.appendChild(sec);
+
+    // 從詳情/修正返回時，捲回剛剛那一筆（保留位置；手機與電腦皆可）。
+    // 先還原當時的捲動位置（編輯不改變列數，最準）；再 scrollIntoView 對齊那一筆當保險。
+    if (listAnchorId != null) {
+      const y = listAnchorScrollY;
+      const target = sec.querySelector(`#txnrow-${listAnchorId}`);
+      const restore = () => {
+        if (y) window.scrollTo(0, y);
+        if (target) { const r = target.getBoundingClientRect(); if (r.top < 0 || r.top > window.innerHeight) target.scrollIntoView({ block: 'center' }); }
+      };
+      setTimeout(restore, 0);
+      setTimeout(restore, 80);
+    }
 
     toolbar.querySelector('#selAll').addEventListener('change', (e) => {
       selected.clear();
