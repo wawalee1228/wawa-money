@@ -20,6 +20,16 @@ const TXTYPE_LABEL = { income: '收入', expense: '支出', transfer: '內部移
 // 分類清單一律依「顯示排序 sort」呈現（內部 id 永不變；§A 編號與名稱脫鉤）
 function catsSorted(categories) { return [...(categories || [])].sort((a, b) => (a.sort ?? 999) - (b.sort ?? 999)); }
 
+// 內部移動的明細顯示名（取代「未分類」；純顯示、不影響統計）
+function transferLabel(t, accounts) {
+  const fa = accounts.find((a) => a.id === t.from_account_id);
+  const ta = accounts.find((a) => a.id === t.to_account_id);
+  if (ta && ta.type === 'wallet') return '儲值';
+  if (ta && ta.type === 'cash' && fa && fa.type !== 'cash') return '領現金';   // 帳戶→現金
+  if (fa && fa.type === 'cash' && ta && ta.type !== 'cash') return '存現金';   // 現金→帳戶
+  return '帳戶間轉帳';
+}
+
 function money(n) {
   if (n == null || n === '') return '—';
   const v = Math.round(Number(n || 0));
@@ -1427,7 +1437,7 @@ export async function renderList(view) {
     const src = t.type === 'income' ? `→ ${acctName(t.to_account_id)}`
       : t.type === 'transfer' ? `${acctName(t.from_account_id)} → ${acctName(t.to_account_id)}`
       : `${acctName(t.from_account_id)}`;
-    const title = t.merchant || catName(t.category_id) || TXTYPE_LABEL[t.type];
+    const title = t.merchant || (t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id)) || TXTYPE_LABEL[t.type];
     const tags = [t.party_tag, t.vehicle_tag].filter(Boolean).join('・');
     const recvTag = t.type !== 'receivable' ? ''
       : (t.settled ? '・<span style="color:var(--ok)">已收回</span>' : '・<span style="color:var(--bad);font-weight:700">待收款</span>');
@@ -1436,7 +1446,7 @@ export async function renderList(view) {
         <div class="txn-top"><span class="txn-title">${title}</span>
           <span class="amt ${cls}">${sign}${money(t.amount).replace('-', '')}</span></div>
         <div class="txn-sub">${formatWithWeekday(t.date)}・${TXTYPE_LABEL[t.type]}・${src}</div>
-        <div class="txn-sub">${catName(t.category_id)}${tags ? '・' + tags : ''}${t.verified ? '・<span style="color:var(--ok)">✅已驗證</span>' : ''}${recvTag}${histTag}</div>
+        <div class="txn-sub">${t.type === 'transfer' ? transferLabel(t, accounts) : catName(t.category_id)}${tags ? '・' + tags : ''}${t.verified ? '・<span style="color:var(--ok)">✅已驗證</span>' : ''}${recvTag}${histTag}</div>
         ${t.pending_reason ? `<div class="txn-warn">${t.pending_reason}</div>` : ''}
       </div>`;
   }

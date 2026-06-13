@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v43-date';
+const APP_VERSION = 'v45-item';
 import {
   renderOverview, renderReport, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing,

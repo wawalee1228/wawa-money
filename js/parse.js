@@ -149,6 +149,36 @@ export function matchCategoryColumn(colText, categories) {
   return null;
 }
 
+// ---- 項目/事由擷取（欄位順序不固定也能拆）----
+// 策略：①已知店名優先 ②取「日期片段之後 ~ 金額片段之前」那段當項目
+//       ③清掉前綴動詞（繳/付/刷…）與尾端的來源/分類詞（現金/中信/娛樂…），保留事由本體。
+// 例：「6/12 我跟先生秀泰按摩 $2377 中信 娛樂」→「我跟先生秀泰按摩」
+//     「6/12 富邦信用卡 繳 $7000 先生中信帳戶」→「富邦信用卡」
+//     「6/11 繳管理費 現金 $1600」→「管理費」
+export function scanItem(text, knownStores = []) {
+  let s = half(text).trim();
+  const hit = (knownStores || []).filter((n) => n && s.includes(n)).sort((a, b) => b.length - a.length)[0];
+  if (hit) return hit;
+
+  let work = s;
+  const dateRe = /(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}月\d{1,2}日?|\d{1,2}\s*\/\s*\d{1,2}|大前天|前天|昨天|今天|明天|後天|(?:上|這|本|下)(?:週|周|禮拜|星期)[一二三四五六日天]|(?:\d+|[零一二兩三四五六七八九十]+)(?:天|日)前)/;
+  const dm = work.match(dateRe);
+  if (dm) work = work.replace(dm[0], ' ');
+
+  // 金額片段：帶幣別優先；否則獨立數字。取最前面的金額，項目＝其前面那段。
+  const am = work.match(/(?:nt\$?|\$)\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?\s*(?:元|塊)|(?:^|[^\d.])([\d,]{2,9})(?![\d.])/i);
+  let cand = (am ? work.slice(0, am.index) : work).trim();
+
+  cand = cand.replace(/^(繳|付|刷|花|買|領|存|儲值|轉|匯|拿|用)+/, '').trim();
+  const SRC = /^(現金|中信|中國信託|玉山|郵局|帳戶|先生中信帳戶|先生|老公|錢包|一卡通|ipass|line\s*pay\s*money|簽帳|卡|繳|付)$/i;
+  const CAT = /^(娛樂|信用卡|卡費|固定支出|債務|貸款|生活|醫療|車輛|工作室|工具|孩子教育|孩子生活|人情|婚喪|送禮|收入)$/;
+  let parts = cand.split(/\s+/).filter(Boolean);
+  while (parts.length > 1 && (SRC.test(parts[parts.length - 1]) || CAT.test(parts[parts.length - 1]))) parts.pop();
+  parts = parts.filter((p) => !/^(繳|付)$/.test(p));
+  cand = parts.join(' ').trim();
+  return cand.length >= 1 ? cand : '';
+}
+
 // ---- 類型：收入/內部移動/支出（預設支出）----
 export function scanType(text) {
   const s = text;
@@ -335,7 +365,9 @@ export function scanSource(text, accounts, cards, defaults = {}) {
   const s = half(text);
   const low = s.toLowerCase();
   const hasBalance = /(餘額|儲值|錢包餘額|錢包)/.test(s);
-  const cardSig = /(簽帳|刷卡|刷|末\s*四|末四碼|信用卡|帳戶扣款)/.test(s);
+  // 刷卡信號（§5）：簽帳/刷/末四碼/帳戶扣款。⚠ 不含「信用卡」——「富邦信用卡」是繳款對象、
+  // 不是付款方式，否則會把「繳信用卡費」誤判成刷簽帳卡、蓋過人稱（先生中信帳戶）。
+  const cardSig = /(簽帳|刷卡|刷|末\s*四|末四碼|帳戶扣款)/.test(s);
   const findAcct = (pred) => accounts.filter((a) => !a.archived).filter(pred);
   const byName = (kw) => findAcct((a) => a.name.includes(kw));
 
@@ -466,6 +498,8 @@ export function parseText(text, ctx, base = new Date()) {
   else if (amtR.amount == null) notes.push('金額：沒抓到 → 留空（待補）');
 
   let merchant = scanMerchant(text, Object.keys(storeCategoryMap));
+  // scanMerchant（已知店名/在X/X買）抓不到 → 用「日期↔金額之間」擷取項目/事由
+  if (!merchant) merchant = scanItem(text, Object.keys(storeCategoryMap));
   if (text.includes('大大寬頻')) merchant = '大大寬頻'; // 特例店家（依金額分類，見下）
   // 結構化行：店家抓不到時，用第 2 欄「項目」當顯示名（明細才看得出買什麼）
   if (!merchant && colSpec && colsAll.length >= 4) {

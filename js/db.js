@@ -215,6 +215,22 @@ export async function ensureDefaults() {
   await backfillV11();
   await backfillV12();
   await backfillV13();
+  await backfillV14();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v14：補關鍵字規則（沿用現有「關鍵字→分類」表，不另開一套）。
+// 信用卡（富邦/中信/一銀…信用卡、卡費）→ 信用卡/卡費(3)；按摩/KTV/電影 → 娛樂(7)。
+// 「管理費→固定支出」v5 已加；合併不覆寫。
+// ----------------------------------------------------------------------------
+export async function backfillV14() {
+  if (await metaGet('backfill_kw_v14', false)) return;
+  const adds = [['信用卡', 3], ['按摩', 7], ['KTV', 7], ['電影', 7]];
+  const kw = (await metaGet('keyword_category_rules', null)) || [];
+  const seen = new Set(kw.map((r) => r.keyword));
+  for (const [k, v] of adds) if (!seen.has(k)) { kw.push({ keyword: k, category_id: v }); seen.add(k); }
+  await metaSet('keyword_category_rules', kw);
+  await metaSet('backfill_kw_v14', true);
 }
 
 // ----------------------------------------------------------------------------
