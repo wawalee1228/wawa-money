@@ -214,6 +214,42 @@ export async function ensureDefaults() {
   await backfillV10();
   await backfillV11();
   await backfillV12();
+  await backfillV13();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v13：新增「中信信貸撥款 610,000」歷史交易（標 historical＝不影響餘額）。
+// 類型＝內部移動（貸款撥款），只有流入（先生中信），不計收支、只進帳戶出入。
+// 防呆查重：5/06 已存在相同撥款（同日+同額+transfer 或備註含撥款）→ 略過，不重複新增。
+// 不動其他交易/分類/負債/帳單/餘額；寫變更紀錄。
+// ----------------------------------------------------------------------------
+export async function backfillV13() {
+  if (await metaGet('backfill_loan_v13', false)) return;
+  const accs = await getAll('accounts');
+  const to = accs.find((a) => a.name.includes('先生 中信'));
+  const txns = await getAll('transactions');
+  const dup = txns.find((t) => !t.deleted && t.date === '2026-05-06' && Number(t.amount) === 610000
+    && (t.type === 'transfer' || /撥款/.test(t.merchant || '') || /撥款/.test(t.note || '')));
+  if (dup) {
+    await metaSet('loan_v13_result', { added: false, reason: '已存在、略過', existingId: dup.id });
+  } else if (!to) {
+    await metaSet('loan_v13_result', { added: false, reason: '找不到先生中信帳戶' });
+  } else {
+    const ts = new Date().toISOString();
+    const rec = {
+      date: '2026-05-06', type: 'transfer', amount: 610000,
+      from_account_id: null, to_account_id: to.id, category_id: null,
+      party_tag: '', vehicle_tag: '', merchant: '中信信貸撥款',
+      note: '實拿601,000(扣開辦費9,000)，用於還當舖30萬、卡費、車貸等',
+      status: 'confirmed', historical: true, pending_reason: '',
+      invoice_no: null, screenshot_id: null, related_txn_id: null,
+      created_at: ts, updated_at: ts, locked_at: null,
+    };
+    const id = await add('transactions', rec);
+    await logChange({ ts, entity: 'transactions', entity_id: id, action: 'add_loan_disbursement', before: null, after: { ...rec, id }, note: '歷史：中信信貸撥款 610,000（不影響餘額、只進帳戶出入流入）' });
+    await metaSet('loan_v13_result', { added: true, id });
+  }
+  await metaSet('backfill_loan_v13', true);
 }
 
 // ----------------------------------------------------------------------------
