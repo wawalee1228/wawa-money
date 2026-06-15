@@ -217,6 +217,32 @@ export async function ensureDefaults() {
   await backfillV13();
   await backfillV14();
   await backfillV15();
+  await backfillV16();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v16：更新負債「台新貸款」的真實資料（對帳單為準）。
+// 利率 5.90%、月付 9,947（原 9,950）、剩餘期數 115（總 120、第 5 期、下次 6/15）、
+// 繳款日 15、剩餘本金 約 845,000（利率5.9%+月付9947+剩115期反推估，標「估算」）。
+// 只改台新這一筆負債欄位；其他負債/交易/餘額一律不動；寫變更紀錄。
+// ----------------------------------------------------------------------------
+export async function backfillV16() {
+  if (await metaGet('debt_taishin_v16', false)) return;
+  const debts = await getAll('debts');
+  const d = debts.find((x) => (x.name || '').includes('台新'));
+  if (!d) { await metaSet('debt_taishin_v16', { updated: false, reason: '找不到台新貸款' }); return; }
+  const before = { ...d };
+  d.rate = 5.9;                    // 年利率（百分比數字）
+  d.monthly_amount = 9947;         // 月付（對帳單為準）
+  d.remaining_terms = 115;         // 剩餘期數
+  d.total_terms = 120;             // 總期數
+  d.pay_day = 15;                  // 每月 15 日
+  d.remaining_principal = 845000;  // 剩餘本金（估算）
+  d.principal_estimated = true;    // 顯示「估算」標示
+  d.note = '本金為估算（利率5.9%＋月付9947＋剩115期反推），日後有確切數字再更新；月付原9950，依對帳單修正為9947';
+  await put('debts', d);
+  await logChange({ ts: '2026-06-16', entity: 'debts', entity_id: d.id, action: 'update_debt', before, after: { ...d }, note: '更新台新貸款真實資料（對帳單）：利率5.9%、月付9947、剩115/120期、本金約845,000(估算)' });
+  await metaSet('debt_taishin_v16', { updated: true, id: d.id, after: { rate: d.rate, monthly_amount: d.monthly_amount, remaining_terms: d.remaining_terms, total_terms: d.total_terms, remaining_principal: d.remaining_principal } });
 }
 
 // ----------------------------------------------------------------------------

@@ -231,7 +231,7 @@ export async function renderOverview(view) {
         : (d.remaining_terms != null ? `剩 ${d.remaining_terms} 期` : '');
       const debtRow = (d, indent) => el(`<div class="kv" ${indent ? 'style="padding-left:18px"' : ''}>
         <span><span class="name">${escapeHtml(d.name)}</span><br><span class="sub">月付 ${money(d.monthly_amount)}・每月 ${d.pay_day} 日${progress(d) ? '・' + progress(d) : ''}${d.split_note || ''}</span></span>
-        <span class="amt ${d.remaining_principal != null ? 'neg' : ''}">${d.remaining_principal != null ? money(d.remaining_principal) : '本金待補'}</span></div>`);
+        <span class="amt ${d.remaining_principal != null ? 'neg' : ''}">${d.remaining_principal != null ? (d.principal_estimated ? `約 ${money(d.remaining_principal)}<span class="sub">（估算）</span>` : money(d.remaining_principal)) : '本金待補'}</span></div>`);
 
       // 分組：group 相同者合併一列，可展開
       const groups = new Map();

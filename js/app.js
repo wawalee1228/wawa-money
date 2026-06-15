@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v50-balfix';
+const APP_VERSION = 'v51-taishin';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -58,6 +58,7 @@ tabs.forEach((t) => t.addEventListener('click', () => {
     console.log('[Wawa] 收入診斷：', { v12: fix12, 收入總筆數: incTx.length, 仍在其他i4: i4cnt, 仍未分類None: nonecnt });
     console.log('[Wawa] 撥款 v13：', await metaGet('loan_v13_result', null));
     console.log('[Wawa] 餘額校正 v15：', await metaGet('balance_correction_v15', null));
+    console.log('[Wawa] 台新 v16：', await metaGet('debt_taishin_v16', null));
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;
