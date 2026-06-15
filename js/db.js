@@ -220,6 +220,67 @@ export async function ensureDefaults() {
   await backfillV16();
   await backfillV17();
   await backfillV18();
+  await backfillV19();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v19：重鋪帳目地基（再跑一次餘額校正；先生中信基準改 5287）。
+// 與 v15/v50 同樣動作，但用新旗標強制再執行一次。
+// 步驟一：date<=2026-06-10 一律強制 historical=true（不論現狀態）。
+// 步驟二：強制重設各帳戶期初餘額＝基準值（先生中信＝5287）。
+// 步驟三：6/11 起交易不動 historical，照常參與餘額。
+// 不刪交易、不改金額；只改 historical 與期初；逐筆寫變更紀錄。動手前 dump 交易快照。
+// ----------------------------------------------------------------------------
+export async function backfillV19() {
+  if (await metaGet('balance_rebase_v19', false)) return;
+  const TS = '2026-06-16';
+  const CUTOFF = '2026-06-10';
+
+  const txns = await getAll('transactions');
+  if (typeof console !== 'undefined') {
+    console.log(`[Wawa] === 餘額校正 v19（重鋪地基）：交易快照（校正前，共 ${txns.length} 筆）===`);
+    console.log(JSON.stringify(txns));
+  }
+
+  // 步驟一：6/10(含)前強制歸歷史
+  let markedHistorical = 0;
+  for (const t of txns) {
+    if (t.deleted) continue;
+    if (String(t.date) <= CUTOFF && !t.historical) {
+      const before = { historical: t.historical || false };
+      t.historical = true;
+      t.updated_at = TS;
+      await put('transactions', t);
+      markedHistorical += 1;
+      await logChange({ ts: TS, entity: 'transactions', entity_id: t.id, action: 'mark_historical', before, after: { historical: true }, note: '餘額校正 v19：6/10(含)前強制歸歷史，不影響餘額（仍留統計）' });
+    }
+  }
+
+  // 步驟二：強制重設期初餘額＝基準（先生中信 5287）
+  const initMap = [
+    ['Wawa 中國信託', 25653], ['Wawa 玉山', 39994], ['Wawa 郵局', 17749], ['Wawa 身上現金', 3957],
+    ['LINE Pay Money', 13], ['一卡通', 33],
+    ['先生 中信', 5287], ['先生 玉山', 20409], ['先生 身上現金', 0],
+    ['哥哥保管金', 4100],
+  ];
+  const accs = await getAll('accounts');
+  let openingReset = 0;
+  const misses = [];
+  for (const [kw, val] of initMap) {
+    const a = accs.find((x) => x.name.includes(kw));
+    if (!a) { misses.push(kw); continue; }
+    if (Number(a.opening_balance || 0) !== val) {
+      const before = { opening_balance: a.opening_balance };
+      a.opening_balance = val;
+      await put('accounts', a);
+      openingReset += 1;
+      await logChange({ ts: TS, entity: 'accounts', entity_id: a.id, action: 'reset_opening', before, after: { opening_balance: val }, note: '餘額校正 v19：期初重設為基準（先生中信＝5287）' });
+    }
+  }
+
+  const result = { markedHistorical, openingReset, misses, ts: TS };
+  await metaSet('balance_rebase_v19', result);
+  if (typeof console !== 'undefined') console.log('[Wawa] 餘額校正 v19 完成：', result);
 }
 
 // ----------------------------------------------------------------------------
