@@ -4,7 +4,7 @@
 // 介面以「越簡單越好」為原則（§15）。
 // ============================================================================
 import * as db from './db.js';
-import { allBalances, totalAssets, custodyTotal, netWorth } from './calc.js';
+import { allBalances, totalAssets, custodyTotal, netWorth, accountBalance } from './calc.js';
 import { runSelfTests } from './selftest.js';
 import { todayStr, formatWithWeekday, weekdayZh, parseRelativeDate, daysBetween } from './date.js';
 import { STATUS, STATUS_LABEL, isProtected, findIssues, canConfirm, buildRecord } from './txns.js';
@@ -86,6 +86,9 @@ function money(n) {
 }
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
 function nowISO() { return new Date().toISOString(); }
+// 呆帳/餘額校正主分類 id（§8 對帳）；找不到時退回 13
+async function badDebtCatId() { return await db.metaGet('baddebt_category_id', 13); }
+const COUNTED_UI = new Set(['confirmed', 'locked', 'await_match']);
 
 // 由 app.js 注入的分頁切換函式
 let navigate = () => {};
@@ -275,6 +278,36 @@ export async function renderOverview(view) {
     }
     view.appendChild(sec);
   }
+
+  // ===== 呆帳 / 帳實差額卡（§8 對帳）：累積校正總額，可展開看每筆，點筆看詳情 =====
+  {
+    const reconTx = txns.filter((t) => !t.deleted && t.is_reconcile && COUNTED_UI.has(t.status));
+    if (reconTx.length) {
+      const signed = (t) => (t.type === 'income' ? Number(t.amount || 0) : -Number(t.amount || 0));
+      const total = reconTx.reduce((s, t) => s + signed(t), 0);
+      const card = el(`<section class="card"><h2 style="cursor:pointer">呆帳 / 帳實差額（§8）<span class="collapse-chev" style="font-size:15px">　+</span></h2>
+        <div class="kv"><span class="name">累積呆帳總額（${reconTx.length} 筆校正）</span><span class="amt ${total < 0 ? 'neg' : 'pos'}">${money(total)}</span></div>
+        <div class="note">對帳補差累積；點標題展開看每筆校正（哪天、哪個帳戶、差多少）。呆帳非真消費，月報可一鍵排除。</div></section>`);
+      const body = el('<div style="display:none"></div>');
+      for (const t of reconTx.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)))) {
+        const acctId = t.type === 'income' ? t.to_account_id : t.from_account_id;
+        const an = accounts.find((x) => x.id === acctId)?.name || '?';
+        const row = el(`<div class="kv" style="padding-left:6px;cursor:pointer">
+          <span><span class="name">${escapeHtml(an)}</span><br><span class="sub">${formatWithWeekday(t.date)}・${escapeHtml(t.note || '')}</span></span>
+          <span class="amt ${t.type === 'income' ? 'pos' : 'neg'}">${t.type === 'income' ? '+' : '-'}${money(t.amount).replace('-', '')}</span></div>`);
+        row.addEventListener('click', () => beginEdit(t.id));
+        body.appendChild(row);
+      }
+      card.appendChild(body);
+      card.querySelector('h2').addEventListener('click', () => {
+        const open = body.style.display === 'none';
+        body.style.display = open ? '' : 'none';
+        card.querySelector('.collapse-chev').textContent = open ? '　−' : '　+';
+      });
+      view.appendChild(card);
+    }
+  }
+
   // 哥哥保管金：獨立餘額＋明細（§B）。用它付＝扣保管金、不算 Wawa 支出；錢進它＝不算收入。
   {
     const CNT = new Set(['confirmed', 'locked', 'await_match']);
@@ -333,7 +366,7 @@ export async function renderOverview(view) {
 
 // ---------------------------------------------------------------- 報表 / 月報（§11.1）
 // 報表頁狀態（重整報表頁時保留）
-let reportState = { kind: 'thisMonth', custom: { start: '', end: '' }, dim: '12', categoryId: null, merchant: null };
+let reportState = { kind: 'thisMonth', custom: { start: '', end: '' }, dim: '12', categoryId: null, merchant: null, excludeBadDebt: false };
 // 計算機狀態（自由區間＋複選分類＋複選店家）
 let calcState = { start: '', end: '', cats: new Set(), merchants: new Set() };
 // 圖表配色：深綠／香檳金／中性色階，不用彩虹
@@ -399,7 +432,8 @@ async function renderReportInner(view) {
   const isIncFilter = reportState.categoryId != null && String(reportState.categoryId).startsWith('i');
   const active = accountsAll.filter((a) => !a.archived);
   const range = periodRange(reportState.kind, new Date(), reportState.custom);
-  const rep = computeReport(txns, accountsAll, categories, { start: range.start, end: range.end, categoryId: reportState.categoryId, merchant: reportState.merchant });
+  const badCatId = await db.metaGet('baddebt_category_id', 13);
+  const rep = computeReport(txns, accountsAll, categories, { start: range.start, end: range.end, categoryId: reportState.categoryId, merchant: reportState.merchant, excludeCatIds: reportState.excludeBadDebt ? [badCatId] : null });
   const nw = netWorth(active, txns, debts);
   const assets = totalAssets(active, txns);
   const catName = (id) => [...categories, ...incomeCats].find((c) => String(c.id) === String(id))?.name || '';
@@ -451,6 +485,7 @@ async function renderReportInner(view) {
       </optgroup></select></label>
     <label class="field"><span class="lab">只看某店家</span><select id="fMer"><option value="">全部店家</option>
       ${periodMerchants.map((m) => `<option value="${escapeHtml(m)}" ${reportState.merchant === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>
+    <label class="inline-check field"><input type="checkbox" id="fExBad" ${reportState.excludeBadDebt ? 'checked' : ''}/> <span>排除呆帳/餘額校正（只看真實消費）</span></label>
   </section>`);
   filt.querySelectorAll('#rngSeg .seg-btn').forEach((b) => b.addEventListener('click', () => { reportState.kind = b.dataset.k; renderReport(view); }));
   if (reportState.kind === 'custom') {
@@ -464,6 +499,7 @@ async function renderReportInner(view) {
     renderReport(view);
   });
   filt.querySelector('#fMer').addEventListener('change', (e) => { reportState.merchant = e.target.value || null; renderReport(view); });
+  filt.querySelector('#fExBad').addEventListener('change', (e) => { reportState.excludeBadDebt = e.target.checked; renderReport(view); });
   view.appendChild(filt);
 
   // ---- 收入 / 支出 / 結餘 ----
@@ -1865,7 +1901,41 @@ export async function renderSettings(view) {
       <label class="inline-check field"><input data-f="include_in_total" type="checkbox" ${a.include_in_total ? 'checked' : ''}/> <span>算進總資產</span></label>
       <label class="inline-check field"><input data-f="archived" type="checkbox" ${a.archived ? 'checked' : ''}/> <span>封存（不再使用）</span></label>
       <button class="btn sm" data-save>儲存這個帳戶</button>
+      <div class="field" style="border-top:1px dashed var(--line);padding-top:8px;margin-top:6px">
+        <span class="lab">校正餘額（對帳 §8）</span>
+        <span style="display:flex;gap:6px;align-items:center">
+          <input data-f="actual" type="number" inputmode="numeric" placeholder="輸入實際餘額" style="max-width:130px"/>
+          <button class="btn sm ghost" data-reconcile>校正</button>
+        </span>
+      </div>
     </div>`);
+    box.querySelector('[data-reconcile]').addEventListener('click', async () => {
+      const raw = box.querySelector('[data-f="actual"]').value.trim();
+      if (raw === '') { alert('請先輸入這個帳戶的實際餘額。'); return; }
+      const actual = Math.round(Number(raw));
+      if (!isFinite(actual)) { alert('實際餘額要是數字。'); return; }
+      const allTx = await db.getAll('transactions');
+      const current = Math.round(accountBalance(a, allTx));
+      const diff = actual - current;
+      if (diff === 0) { alert(`帳實相符：系統與實際都是 ${money(current)}，無需校正。`); return; }
+      const isExpense = diff < 0;
+      const ok = confirm(`將校正：「${a.name}」 ${money(current)} → ${money(actual)}\n差 ${money(diff)} 歸「呆帳/餘額校正」。\n\n會新增一筆${isExpense ? '支出' : '收入'}校正交易（當期、會影響餘額），校正後此帳戶餘額 = ${money(actual)}。確定？`);
+      if (!ok) return;
+      const ts = nowISO();
+      const rec = {
+        date: todayStr(), type: isExpense ? 'expense' : 'income', amount: Math.abs(diff),
+        from_account_id: isExpense ? a.id : null, to_account_id: isExpense ? null : a.id,
+        category_id: await badDebtCatId(), party_tag: '', vehicle_tag: '',
+        merchant: '餘額校正', note: `對帳：實際${actual} − 系統${current} = 差${diff > 0 ? '+' : ''}${diff}`,
+        status: 'confirmed', historical: false, is_reconcile: true, pending_reason: '',
+        invoice_no: null, screenshot_id: null, related_txn_id: null,
+        created_at: ts, updated_at: ts, locked_at: null,
+      };
+      const id = await db.add('transactions', rec);
+      await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'reconcile_adjust', before: null, after: { ...rec, id }, note: `餘額校正「${a.name}」：系統 ${current} → 實際 ${actual}，差 ${diff} 歸呆帳` });
+      alert(`已校正：「${a.name}」現在餘額 = ${money(actual)}（新增呆帳 ${money(diff)}）。`);
+      navigate('settings');
+    });
     box.querySelector('[data-save]').addEventListener('click', async () => {
       const before = { ...a };
       a.name = box.querySelector('[data-f="name"]').value.trim() || a.name;

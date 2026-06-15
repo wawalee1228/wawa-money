@@ -218,6 +218,46 @@ export async function ensureDefaults() {
   await backfillV14();
   await backfillV15();
   await backfillV16();
+  await backfillV17();
+  await backfillV18();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v17：修正「先生 中信（貸款帳戶）」期初餘額設定錯誤 → 5287。
+// 只改這一個帳戶的 opening_balance（強制覆寫）；其他帳戶/交易/historical 一律不動。
+// 不新增任何呆帳/校正交易（這是設定錯誤，不是對帳差額）；寫變更紀錄。
+// ----------------------------------------------------------------------------
+export async function backfillV17() {
+  if (await metaGet('husband_open_fix_v17', false)) return;
+  const accs = await getAll('accounts');
+  const a = accs.find((x) => (x.name || '').includes('先生 中信'));
+  if (!a) { await metaSet('husband_open_fix_v17', { updated: false, reason: '找不到先生中信帳戶' }); return; }
+  const before = { opening_balance: a.opening_balance };
+  a.opening_balance = 5287;
+  await put('accounts', a);
+  await logChange({ ts: '2026-06-16', entity: 'accounts', entity_id: a.id, action: 'fix_opening', before, after: { opening_balance: 5287 }, note: '修正先生中信期初餘額設定錯誤 → 5287（非對帳差額，不產生校正交易）' });
+  await metaSet('husband_open_fix_v17', { updated: true, id: a.id, opening_balance: 5287, prev: before.opening_balance });
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v18（§8 對帳）：新增主分類「呆帳 / 餘額校正」（id 13；id 不重用）。
+// 供「帳戶餘額校正」對帳補差使用；月報可見、可一鍵排除（呆帳非真消費）。
+// 記下分類 id 到 meta.baddebt_category_id，程式以此辨識呆帳交易。
+// ----------------------------------------------------------------------------
+export async function backfillV18() {
+  if (await metaGet('baddebt_cat_v18', false)) return;
+  const cats = await metaGet('categories', []);
+  let bd = cats.find((c) => c.name && c.name.includes('呆帳'));
+  if (!bd) {
+    const usedIds = new Set(cats.map((c) => Number(c.id)));
+    let nid = 13; while (usedIds.has(nid) || nid === 9) nid += 1; // 9 已退役、不重用
+    bd = { id: nid, name: '呆帳 / 餘額校正', group4: null, sort: 99 };
+    cats.push(bd);
+    await metaSet('categories', cats);
+    await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: bd.id, action: 'add', before: null, after: { ...bd }, note: '新增主分類「呆帳/餘額校正」（§8 對帳補差）' });
+  }
+  await metaSet('baddebt_category_id', bd.id);
+  await metaSet('baddebt_cat_v18', { id: bd.id });
 }
 
 // ----------------------------------------------------------------------------

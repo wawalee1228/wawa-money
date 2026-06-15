@@ -29,11 +29,14 @@ export function periodRange(kind, now = new Date(), custom = {}) {
 
 // 期間 + 篩選（分類/店家）下的彙總
 export function computeReport(txns, accounts, categories, filters) {
-  const { start, end, categoryId = null, merchant = null } = filters;
+  const { start, end, categoryId = null, merchant = null, excludeCatIds = null } = filters;
   const catName = (id) => categories.find((c) => String(c.id) === String(id))?.name || '未分類';
   const catGroup = (id) => { const c = categories.find((x) => String(x.id) === String(id)); return c && c.group4 ? c.group4 : null; };
 
-  const base = txns.filter((t) => !t.deleted && COUNTED.has(t.status) && t.date >= start && t.date <= end);
+  // 可選排除某些分類（例：呆帳/餘額校正——非真消費，看「真實支出」時排除）
+  const exSet = (excludeCatIds && excludeCatIds.length) ? new Set(excludeCatIds.map(String)) : null;
+  const base = txns.filter((t) => !t.deleted && COUNTED.has(t.status) && t.date >= start && t.date <= end
+    && !(exSet && exSet.has(String(t.category_id))));
   // 分類篩選是「型別範圍」：選收入類（i 開頭）→ 只縮收入、支出照常；選支出類 → 只縮支出、收入照常
   const isIncCat = categoryId != null && String(categoryId).startsWith('i');
   const filtered = base.filter((t) => {
