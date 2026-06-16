@@ -189,7 +189,7 @@ export async function renderOverview(view) {
   rptBtn.querySelector('#goCalc').addEventListener('click', () => navigate('calc'));
   view.appendChild(rptBtn);
 
-  // ===== 近期帳單卡（§11.2）：7 天內到期＋本月逾期未繳；勾掉＝本月完成，下月自動重來 =====
+  // ===== 近期帳單卡（§11.2）：未來 10 天內到期＋逾期未繳（一律顯示，防漏繳）；勾掉＝本月完成，下月自動重來 =====
   {
     const activeBills = bills.filter((b) => b.status === 'active');
     if (activeBills.length) {
@@ -208,10 +208,10 @@ export async function renderOverview(view) {
           : new Date(today.getFullYear(), today.getMonth() + 1, Math.min(b.pay_day, dim(today.getFullYear(), today.getMonth() + 1)));
         const daysLeft = Math.round((due - startToday) / 86400000);
         return { b, done, overdue, due, daysLeft };
-      }).filter((r) => r.done || r.overdue || r.daysLeft <= 7)
+      }).filter((r) => r.done || r.overdue || r.daysLeft <= 10)
         .sort((a, b2) => a.due - b2.due);
 
-      const card = el(`<section class="card"><h2>近期帳單（7 天內）</h2>
+      const card = el(`<section class="card"><h2>近期帳單（10 天內）</h2>
         <div class="kv"><span class="name">本月固定支出總額</span><span class="amt">${money(monthTotal)}</span></div>
         <div class="kv"><span class="name">本月已繳</span><span class="sub">${doneCnt} / ${activeBills.length} 筆</span></div></section>`);
       // 單列建構（含勾選/記一筆 handler），未繳與已繳共用同一段
