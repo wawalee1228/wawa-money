@@ -103,6 +103,7 @@ export function buildRecord(form, issues, nowISO, opts = {}) {
     principal_part: form.principal_part != null && form.principal_part !== '' ? Number(form.principal_part) : null,
     interest_part: form.interest_part != null && form.interest_part !== '' ? Number(form.interest_part) : null,
     split_pending: !!form.split_pending,
+    interest_only: !!form.interest_only,   // 只繳息／不計期數（期數計算時排除這筆）
     updated_at: nowISO,
     locked_at: status === STATUS.LOCKED ? nowISO : (form.locked_at || null),
   };

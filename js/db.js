@@ -221,6 +221,68 @@ export async function ensureDefaults() {
   await backfillV17();
   await backfillV18();
   await backfillV19();
+  await backfillV20();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v20：負債「剩餘期數」治本校正（§2.5）。
+// 真因：中信信貸種子 remaining_terms=71 已把 5/16 繳息算成一期（72−1），舊「確認再 −1」
+//   在記 5/16 時又扣一次 → 雙重計；刪除又不回補 → 期數累積誤差。
+// 治本：每筆負債設 terms_baseline（real-world 對帳起點），剩餘期數＝起點 − 有效繳款筆數。
+//   有效繳款＝關聯該負債、未刪、非歷史、已成立、且非「只繳息」。
+// 校正目標：中信信貸 total72、5/16標只繳息→remaining71；台新 total120→remaining115；
+//   中租大Volvo/小Volvo新光/恩沛 依各自有效繳款數重算；遠東×3 未追蹤期數→不動。
+// ----------------------------------------------------------------------------
+export async function backfillV20() {
+  if (await metaGet('debt_terms_v20', false)) return;
+  const TS = '2026-06-16';
+  const COUNTED = new Set(['confirmed', 'locked', 'await_match']);
+  const txns = await getAll('transactions');
+  const debts = await getAll('debts');
+
+  // ① 先把中信信貸 5/16 的繳款標「只繳息／不計期」（找關聯該負債、日期 2026-05-16 的繳款）
+  const zhongxin = debts.find((d) => (d.name || '').includes('中信信貸'));
+  let markedInterestOnly = 0;
+  if (zhongxin) {
+    for (const t of txns) {
+      if (t.deleted) continue;
+      if (String(t.debt_id) === String(zhongxin.id) && String(t.date) === '2026-05-16' && !t.interest_only) {
+        const before = { interest_only: !!t.interest_only };
+        t.interest_only = true; t.updated_at = TS;
+        await put('transactions', t);
+        markedInterestOnly += 1;
+        await logChange({ ts: TS, entity: 'transactions', entity_id: t.id, action: 'mark_interest_only', before, after: { interest_only: true }, note: '中信信貸 5/16 首期只繳息，不計入期數（v20）' });
+      }
+    }
+  }
+
+  // ② 有效繳款數（已反映上面的 interest_only）
+  const validCount = (debtId) => txns.filter((t) => !t.deleted && !t.historical && COUNTED.has(t.status)
+    && String(t.debt_id) === String(debtId) && !t.interest_only).length;
+
+  // ③ 設 terms_baseline + remaining_terms（起點固定不變；剩餘＝起點 − 有效繳款）
+  const report = [];
+  for (const d of debts) {
+    const nm = d.name || '';
+    const c = validCount(d.id);
+    let baseline = null, total = d.total_terms;
+    if (nm.includes('中信信貸')) { total = 72; baseline = 72; }          // 起點 72（5/16 已排除）→ 6/16 還本 1 期 → 71
+    else if (nm.includes('台新')) { total = 120; baseline = 115 + c; }   // 對帳單已繳5期 → 固定停在 115，往後新繳才扣
+    else if (nm.includes('中租')) { baseline = 46 + 0; }                  // 種子 46 為起點
+    else if (nm.includes('新光')) { baseline = 24; }
+    else if (nm.includes('恩沛')) { baseline = 1; }
+    else { continue; }                                                    // 遠東×3 等未追蹤期數者不動
+    const before = d.remaining_terms;
+    const remaining = Math.max(0, baseline - c);
+    d.terms_baseline = baseline;
+    if (total != null) d.total_terms = total;
+    d.remaining_terms = remaining;
+    await put('debts', d);
+    await logChange({ ts: TS, entity: 'debts', entity_id: d.id, action: 'fix_terms', before: { remaining_terms: before }, after: { terms_baseline: baseline, total_terms: d.total_terms, remaining_terms: remaining }, note: '期數治本校正 v20（起點 − 有效繳款）' });
+    report.push({ name: nm, before, after: remaining, baseline, total: d.total_terms, validPayments: c });
+  }
+  await metaSet('debt_terms_v20', { markedInterestOnly, report, ts: TS });
+  if (typeof console !== 'undefined') console.log('[Wawa] 期數校正 v20：', { markedInterestOnly, report });
 }
 
 // ----------------------------------------------------------------------------

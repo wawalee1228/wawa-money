@@ -4,7 +4,7 @@
 // 介面以「越簡單越好」為原則（§15）。
 // ============================================================================
 import * as db from './db.js';
-import { allBalances, totalAssets, custodyTotal, netWorth, accountBalance } from './calc.js';
+import { allBalances, totalAssets, custodyTotal, netWorth, accountBalance, debtValidPaymentCount, debtRemainingTerms } from './calc.js';
 import { runSelfTests } from './selftest.js';
 import { todayStr, formatWithWeekday, weekdayZh, parseRelativeDate, daysBetween } from './date.js';
 import { STATUS, STATUS_LABEL, isProtected, findIssues, canConfirm, buildRecord } from './txns.js';
@@ -88,6 +88,25 @@ function el(html) { const t = document.createElement('template'); t.innerHTML = 
 function nowISO() { return new Date().toISOString(); }
 // 呆帳/餘額校正主分類 id（§8 對帳）；找不到時退回 13
 async function badDebtCatId() { return await db.metaGet('baddebt_category_id', 13); }
+
+// 期數重算（治本）：對受影響的負債，把 remaining_terms 設成「起點 − 有效繳款筆數」。
+// 新增/修正/改來源/刪除/復原繳款後都呼叫；同一筆不會重複扣，刪除自動回補。
+async function recomputeDebtTerms(debtIds) {
+  const ids = [...new Set((debtIds || []).filter((x) => x != null).map(String))];
+  if (!ids.length) return;
+  const [txns, debts] = await Promise.all([db.getAll('transactions'), db.getAll('debts')]);
+  for (const idStr of ids) {
+    const d = debts.find((x) => String(x.id) === idStr);
+    if (!d || d.terms_baseline == null) continue; // 沒在追蹤期數的不動
+    const nv = debtRemainingTerms(d, txns);
+    if (nv !== d.remaining_terms) {
+      const before = d.remaining_terms;
+      d.remaining_terms = nv;
+      await db.put('debts', d);
+      await db.logChange({ ts: nowISO(), entity: 'debts', entity_id: d.id, action: 'recompute_terms', before: { remaining_terms: before }, after: { remaining_terms: nv }, note: `期數重算＝起點 ${d.terms_baseline} − 有效繳款 ${debtValidPaymentCount(d.id, txns)}` });
+    }
+  }
+}
 const COUNTED_UI = new Set(['confirmed', 'locked', 'await_match']);
 
 // 由 app.js 注入的分頁切換函式
@@ -988,14 +1007,25 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     } else {
       splitNote = 'ℹ 這筆負債本金待補：入帳只會把剩餘期數 −1，不動本金。';
     }
-    card.appendChild(el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244" id="splitBox">
+    const cur = debt.remaining_terms;
+    const splitBox = el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244" id="splitBox">
       <b>繳「${escapeHtml(debt.name)}」— 本利拆分</b><br><span style="font-size:12.5px">${splitNote}</span>
       <div class="row" style="margin-top:8px">
         <label class="field" style="margin:0"><span class="lab">本金</span><input id="sp_p" type="number" inputmode="numeric" value="${estP}"></label>
         <label class="field" style="margin:0"><span class="lab">利息/費用</span><input id="sp_i" type="number" inputmode="numeric" value="${estI}"></label>
       </div>
-      ${debt.remaining_terms != null ? `<span style="font-size:12px">入帳後剩餘期數 ${debt.remaining_terms} → ${Math.max(0, debt.remaining_terms - 1)}</span>` : ''}
-    </div>`));
+      <label class="inline-check" style="margin-top:8px"><input type="checkbox" id="sp_io" ${rec && rec.interest_only ? 'checked' : ''}> <span>只繳息／不計入期數（例：首期只繳利息）</span></label>
+      ${cur != null ? `<div style="font-size:12px;margin-top:6px" id="termsPreview">${rec && rec.interest_only ? `剩餘期數不變（只繳息）：維持 ${cur}` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`}</div>` : ''}
+    </div>`);
+    card.appendChild(splitBox);
+    // 勾「只繳息」→ 期數不變、本金歸 0；預覽即時更新
+    const io = splitBox.querySelector('#sp_io');
+    const tp = splitBox.querySelector('#termsPreview');
+    if (io) io.addEventListener('change', () => {
+      if (tp && cur != null) tp.innerHTML = io.checked ? `剩餘期數不變（只繳息）：維持 ${cur}` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`;
+      const spP = splitBox.querySelector('#sp_p');
+      if (io.checked && spP) spP.value = '0'; // 只繳息 → 本金 0
+    });
   }
 
   // 段5-1：預設帶入的帳戶 → 在確認卡顯眼提示「我填了 X，對嗎？」（一眼確認）
@@ -1036,11 +1066,12 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     ok.addEventListener('click', () => {
       if (ok.disabled) return;
       // 讀本利拆分輸入（有 splitBox 才有）；都空＝未拆 → 標待拆（不扣本金）
-      const spP = card.querySelector('#sp_p'), spI = card.querySelector('#sp_i');
+      const spP = card.querySelector('#sp_p'), spI = card.querySelector('#sp_i'), spIO = card.querySelector('#sp_io');
       if (spP || spI) {
-        f.principal_part = spP && spP.value !== '' ? Number(spP.value) : null;
+        f.interest_only = !!(spIO && spIO.checked); // 只繳息 → 不計入期數
+        f.principal_part = f.interest_only ? 0 : (spP && spP.value !== '' ? Number(spP.value) : null);
         f.interest_part = spI && spI.value !== '' ? Number(spI.value) : null;
-        f.split_pending = (f.principal_part == null && debt && debt.remaining_principal != null);
+        f.split_pending = (!f.interest_only && f.principal_part == null && debt && debt.remaining_principal != null);
       }
       saveRecord(f, issues, isEdit, rec, { forceLocked: isEdit });
     });
@@ -1076,8 +1107,8 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
     const id = await db.add('transactions', record);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'create', before: null, after: { ...record, id }, note: '新增交易' });
 
-    // §2.5 負債繳款遞減：只在「新增且已確認」時套用一次（修正不重複扣，要調整去設定區改負債）。
-    // 本金：有拆出 principal_part 才扣；期數：有追蹤剩餘期數者一律 −1。
+    // §2.5 負債繳款本金遞減：只在「新增且已確認」時套用一次。
+    // （期數不在這裡 −1：一律由下方 recomputeDebtTerms 以「起點 − 有效繳款數」推導，避免重複扣／刪不回補。）
     if (record.status === STATUS.CONFIRMED && record.debt_id) {
       const d = await db.get('debts', record.debt_id);
       if (d && d.status === 'active') {
@@ -1085,10 +1116,9 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
         if (record.principal_part != null && d.remaining_principal != null) {
           d.remaining_principal = Math.max(0, Number(d.remaining_principal) - Number(record.principal_part));
         }
-        if (d.remaining_terms != null) d.remaining_terms = Math.max(0, Number(d.remaining_terms) - 1);
         d.last_paid_at = ts;
         await db.put('debts', d);
-        await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `繳款 ${money(record.amount)}（本金 ${record.principal_part != null ? money(record.principal_part) : '未拆'}${record.split_pending ? '・標待拆' : ''}）` });
+        await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `繳款 ${money(record.amount)}（本金 ${record.principal_part != null ? money(record.principal_part) : '未拆'}${record.split_pending ? '・標待拆' : ''}${record.interest_only ? '・只繳息不計期' : ''}）` });
       }
     }
 
@@ -1116,6 +1146,10 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
       await db.logChange({ ts, entity: 'store_category_map', entity_id: null, action: before == null ? 'learn' : 'update', before: { store: record.merchant, category_id: before }, after: { store: record.merchant, category_id: record.category_id }, note: '店家分類記憶' });
     }
   }
+
+  // 期數重算（治本）：新增或修正都跑，涵蓋改來源/改負債/重新確認；同一筆不重複扣。
+  // 修正可能把繳款移到別的負債，故新舊負債都要重算。
+  await recomputeDebtTerms([rec && rec.debt_id, record.debt_id, f.debt_id]);
 
   clearEditing();
   navigate('list');
@@ -1848,27 +1882,33 @@ async function confirmDelete(ids) {
   if (!ids.length) return;
   if (!confirm(`確定刪除這 ${ids.length} 筆交易嗎？\n（移到「已刪除」可復原，不會永久消失）`)) return;
   const ts = nowISO();
+  const affectedDebts = [];
   for (const id of ids) {
     const t = await db.get('transactions', id);
     if (!t || t.deleted) continue;
+    if (t.debt_id != null) affectedDebts.push(t.debt_id);
     const before = { ...t };
     t.deleted = true; t.deleted_at = ts;
     await db.put('transactions', t);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'soft_delete', before, after: { ...t }, note: '使用者刪除（軟刪除，可復原）' });
   }
+  await recomputeDebtTerms(affectedDebts); // 刪繳款 → 期數回補
   navigate('list');
 }
 
 async function restoreTxns(ids) {
   const ts = nowISO();
+  const affectedDebts = [];
   for (const id of ids) {
     const t = await db.get('transactions', id);
     if (!t || !t.deleted) continue;
+    if (t.debt_id != null) affectedDebts.push(t.debt_id);
     const before = { ...t };
     delete t.deleted; delete t.deleted_at;
     await db.put('transactions', t);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'restore', before, after: { ...t }, note: '使用者復原刪除的交易' });
   }
+  await recomputeDebtTerms(affectedDebts); // 復原繳款 → 期數再扣回
   navigate('list');
 }
 
@@ -1887,12 +1927,16 @@ async function markDuplicates(ids) {
   keeper.verified = true; keeper.verified_at = ts;
   await db.put('transactions', keeper);
   await db.logChange({ ts, entity: 'transactions', entity_id: keeper.id, action: 'verify', before: kBefore, after: { ...keeper }, note: '標為重複：保留並驗證此筆' });
+  const affectedDebts = [];
   for (const t of losers) {
+    if (t.debt_id != null) affectedDebts.push(t.debt_id);
     const before = { ...t };
     t.deleted = true; t.deleted_at = ts; t.dup_of = keeper.id;
     await db.put('transactions', t);
     await db.logChange({ ts, entity: 'transactions', entity_id: t.id, action: 'soft_delete', before, after: { ...t }, note: `標為重複：與 #${keeper.id} 同一筆，移入垃圾桶` });
   }
+  if (keeper.debt_id != null) affectedDebts.push(keeper.debt_id);
+  await recomputeDebtTerms(affectedDebts); // 去重後 → 期數依保留的有效筆數重算
   navigate('list');
 }
 
@@ -1926,13 +1970,16 @@ async function hardDeleteMany(ids) {
   if (!confirm(`永久刪除這 ${ids.length} 筆？\n此動作無法復原（垃圾桶也找不回）。`)) return;
   const ts = nowISO();
   const shots = await db.getAll('screenshots');
+  const affectedDebts = [];
   for (const id of ids) {
     const t = await db.get('transactions', id);
     if (!t) continue;
+    if (!t.deleted && t.debt_id != null) affectedDebts.push(t.debt_id); // 永久刪一筆「還沒軟刪」的繳款 → 回補
     for (const s of shots.filter((x) => x.txn_id === id)) await db.del('screenshots', s.id);
     await db.del('transactions', id);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'hard_delete', before: t, after: null, note: '永久刪除（不可復原）' });
   }
+  await recomputeDebtTerms(affectedDebts);
   navigate('list');
 }
 

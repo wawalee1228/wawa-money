@@ -74,6 +74,23 @@ export function custodyTotal(accounts, txns, opts = {}) {
     .reduce((sum, a) => sum + accountBalance(a, txns, opts), 0);
 }
 
+// 某負債的「有效繳款筆數」：關聯到該負債、未刪除、非歷史、已成立、且非「只繳息不計期」的繳款。
+// 治本原則：剩餘期數一律由此推導，不靠「每次確認 −1、刪除不回補」那種會累積錯誤的做法。
+const TERM_COUNTED = new Set(['confirmed', 'locked', 'await_match']);
+export function debtValidPaymentCount(debtId, txns) {
+  if (debtId == null) return 0;
+  return (txns || []).filter((t) => !t.deleted && !t.historical && TERM_COUNTED.has(t.status)
+    && String(t.debt_id) === String(debtId) && !t.interest_only).length;
+}
+
+// 剩餘期數 = 期數起點（terms_baseline，real-world 對帳起點，不變）− 有效繳款筆數。
+// 未設 terms_baseline（沒在追蹤期數，例：遠東房貸）→ 沿用原 remaining_terms，不動。
+export function debtRemainingTerms(debt, txns) {
+  if (!debt) return null;
+  if (debt.terms_baseline == null) return debt.remaining_terms ?? null;
+  return Math.max(0, Number(debt.terms_baseline) - debtValidPaymentCount(debt.id, txns));
+}
+
 // 負債餘額合計（§11.1）：有剩餘本金用本金；只有剩餘期數者，以 月繳×期數 估算（偏保守）。
 // 只計 active 負債（結清封存的不計）。
 export function debtsOutstanding(debts) {

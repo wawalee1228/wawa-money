@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v55-guard-billsync';
+const APP_VERSION = 'v56-terms';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -62,6 +62,7 @@ tabs.forEach((t) => t.addEventListener('click', () => {
     console.log('[Wawa] 先生中信期初 v17：', await metaGet('husband_open_fix_v17', null));
     console.log('[Wawa] 呆帳分類 v18：', await metaGet('baddebt_cat_v18', null));
     console.log('[Wawa] 重鋪地基 v19：', await metaGet('balance_rebase_v19', null));
+    console.log('[Wawa] 期數校正 v20：', await metaGet('debt_terms_v20', null));
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;
