@@ -1019,10 +1019,15 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
   const debt = f.debt_id ? debts.find((d) => d.id === f.debt_id) : null;
   if (debt && f.type === 'expense' && f.amount) {
     const amt = Number(f.amount);
+    // §2.5 手續費不還本金：偵測到手續費（實際−月繳＝1~50，僅新增時認）→ 先剝離手續費，
+    // 用「月繳排程額」當拆分基數，手續費不進本金也不進利息。修正模式不剝離（沿用實際金額）。
+    const schedAmt = Number(debt.monthly_amount || 0);
+    const feeDiff0 = schedAmt > 0 ? Math.round(amt - schedAmt) : 0;
+    const splitBase = (!isEdit && feeDiff0 > 0 && feeDiff0 <= 50) ? schedAmt : amt;
     let estI = '', estP = '', splitNote;
     if (debt.rate != null && debt.remaining_principal != null) {
       const i = Math.max(0, Math.round(Number(debt.remaining_principal) * Number(debt.rate) / 100 / 12));
-      estI = Math.min(i, amt); estP = Math.max(0, amt - estI);
+      estI = Math.min(i, splitBase); estP = Math.max(0, splitBase - estI);
       splitNote = `依剩餘本金 ${money(debt.remaining_principal)} × 年利率 ${debt.rate}% ÷ 12 估算（可手動改）。本金部分會從這筆負債扣。`;
     } else if (debt.remaining_principal != null) {
       splitNote = '⚠ 利率未知：預設「全額暫不扣本金、標待拆」；你也可以手動填本金/利息。';
@@ -1037,14 +1042,14 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
         <label class="field" style="margin:0"><span class="lab">利息/費用</span><input id="sp_i" type="number" inputmode="numeric" value="${estI}"></label>
       </div>
       <label class="inline-check" style="margin-top:8px"><input type="checkbox" id="sp_io" ${rec && rec.interest_only ? 'checked' : ''}> <span>只繳息／不計入期數（例：首期只繳利息）</span></label>
-      ${cur != null ? `<div style="font-size:12px;margin-top:6px" id="termsPreview">${rec && rec.interest_only ? `剩餘期數不變（只繳息）：維持 ${cur}` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`}</div>` : ''}
+      ${cur != null ? `<div style="font-size:12px;margin-top:6px" id="termsPreview">${rec && rec.interest_only ? `剩餘期數不變（只繳息）：維持 ${cur}` : (isEdit ? `期數維持 ${cur}（修正不改期數）` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`)}</div>` : ''}
     </div>`);
     card.appendChild(splitBox);
     // 勾「只繳息」→ 期數不變、本金歸 0；預覽即時更新
     const io = splitBox.querySelector('#sp_io');
     const tp = splitBox.querySelector('#termsPreview');
     if (io) io.addEventListener('change', () => {
-      if (tp && cur != null) tp.innerHTML = io.checked ? `剩餘期數不變（只繳息）：維持 ${cur}` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`;
+      if (tp && cur != null) tp.innerHTML = io.checked ? `剩餘期數不變（只繳息）：維持 ${cur}` : (isEdit ? `期數維持 ${cur}（修正不改期數）` : `入帳後剩餘期數 ${cur} → ${Math.max(0, cur - 1)}`);
       const spP = splitBox.querySelector('#sp_p');
       if (io.checked && spP) spP.value = '0'; // 只繳息 → 本金 0
     });

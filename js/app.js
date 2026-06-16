@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v63-baddebtC';
+const APP_VERSION = 'v64-feesplit-editterm';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
