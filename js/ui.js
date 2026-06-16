@@ -214,8 +214,8 @@ export async function renderOverview(view) {
       const card = el(`<section class="card"><h2>近期帳單（7 天內）</h2>
         <div class="kv"><span class="name">本月固定支出總額</span><span class="amt">${money(monthTotal)}</span></div>
         <div class="kv"><span class="name">本月已繳</span><span class="sub">${doneCnt} / ${activeBills.length} 筆</span></div></section>`);
-      if (!rows.length) card.appendChild(el('<div class="note">7 天內沒有要繳的帳單 ✓</div>'));
-      for (const r of rows) {
+      // 單列建構（含勾選/記一筆 handler），未繳與已繳共用同一段
+      const buildRow = (r) => {
         const when = r.done ? '本月已繳' : (r.overdue ? `<span style="color:var(--bad);font-weight:700">逾期 ${Math.round((startToday - r.due) / 86400000)} 天（${r.due.getMonth() + 1}/${r.due.getDate()}）</span>`
           : (r.daysLeft === 0 ? '<b>今天到期</b>' : `${r.due.getMonth() + 1}/${r.due.getDate()}（${r.daysLeft} 天後）`));
         const row = el(`<div class="bill-row ${r.done ? 'done' : ''}">
@@ -243,7 +243,29 @@ export async function renderOverview(view) {
           clearEditing();
           navigate('entry');
         });
-        card.appendChild(row);
+        return row;
+      };
+
+      // 功能 B：未繳款攤開排上面；已繳收合成一條折疊列排下方（每次進總覽都重置：未繳開、已繳收）
+      const undoneRows = rows.filter((r) => !r.done);
+      const doneRows = rows.filter((r) => r.done);
+      if (!undoneRows.length) {
+        card.appendChild(el('<div class="note">目前沒有待繳帳單 ✓</div>'));
+      } else {
+        for (const r of undoneRows) card.appendChild(buildRow(r));
+      }
+      if (doneRows.length) {
+        const head = el(`<div class="kv bill-collapse" style="cursor:pointer">
+          <span class="name" style="color:var(--muted);font-weight:500">已繳 ${doneRows.length} 筆 <span class="collapse-chev" style="font-size:13px">▸</span></span></div>`);
+        const body = el('<div style="display:none"></div>');
+        for (const r of doneRows) body.appendChild(buildRow(r));
+        head.addEventListener('click', () => {
+          const open = body.style.display === 'none';
+          body.style.display = open ? '' : 'none';
+          head.querySelector('.collapse-chev').textContent = open ? '▾' : '▸';
+        });
+        card.appendChild(head);
+        card.appendChild(body);
       }
       view.appendChild(card);
     }
