@@ -223,6 +223,26 @@ export async function ensureDefaults() {
   await backfillV19();
   await backfillV20();
   await backfillV21();
+  await backfillV22();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v22：把「轉帳手續費」分類歸進 4 群 C（固定・剛性）。
+// v21 在既有資料庫建分類時 group4 為 null（落在報表「未分類」），這裡補歸 C。
+// 只動這一個分類的 group4；不碰其他分類、不碰交易、不碰餘額。
+// ----------------------------------------------------------------------------
+export async function backfillV22() {
+  if (await metaGet('fee_group_v22', false)) return;
+  const cats = await metaGet('categories', []);
+  const feeId = await metaGet('fee_category_id', null);
+  const fee = cats.find((c) => String(c.id) === String(feeId)) || cats.find((c) => c.name && c.name.includes('手續費'));
+  if (fee && fee.group4 !== 'C') {
+    const before = { group4: fee.group4 };
+    fee.group4 = 'C';
+    await metaSet('categories', cats);
+    await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: fee.id, action: 'update', before, after: { group4: 'C' }, note: '轉帳手續費歸入 4 群 C（固定・剛性）' });
+  }
+  await metaSet('fee_group_v22', { id: fee ? fee.id : null, group4: 'C' });
 }
 
 // ----------------------------------------------------------------------------
@@ -236,7 +256,7 @@ export async function backfillV21() {
   if (!fee) {
     const used = new Set(cats.map((c) => Number(c.id)));
     let nid = 14; while (used.has(nid) || nid === 9) nid += 1; // 9 已退役、不重用
-    fee = { id: nid, name: '轉帳手續費', group4: null, sort: 98 };
+    fee = { id: nid, name: '轉帳手續費', group4: 'C', sort: 98 }; // 4 群歸 C（固定・剛性，伴隨負債繳款）
     cats.push(fee);
     await metaSet('categories', cats);
     await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: fee.id, action: 'add', before: null, after: { ...fee }, note: '新增主分類「轉帳手續費」（負債繳款自動標註用）' });
