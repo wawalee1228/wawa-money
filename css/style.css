@@ -329,3 +329,24 @@ h2.collapse-h { display: flex; align-items: center; justify-content: space-betwe
 .seg { display: flex; gap: 4px; background: #F2EEE3; padding: 4px; border-radius: 12px; margin-bottom: 16px; }
 .seg-btn { flex: 1; border: 0; background: none; padding: 10px 0; border-radius: 9px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; letter-spacing: .04em; }
 .seg-btn.on { background: #fff; color: var(--green); box-shadow: 0 1px 3px rgba(31,43,40,.08); }
+
+/* ── 回到頂部浮動鈕（通用元件；捲動容器＝window）──────────────────────────── */
+/* 預設隱藏、不擋畫面；捲過約 400px 才淡入。位置浮在底部 tab bar 上方。 */
+.back-to-top {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--tab-h) + env(safe-area-inset-bottom) + 16px);
+  z-index: 30; /* 高於 tabbar(20)，但靠 bottom 偏移浮在其上方、不重疊按鈕 */
+  width: 46px; height: 46px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%;
+  background: var(--green); color: var(--gold);
+  box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  cursor: pointer;
+  opacity: 0; visibility: hidden; transform: translateY(8px);
+  transition: opacity .22s ease, transform .22s ease, visibility .22s;
+  -webkit-tap-highlight-color: transparent;
+}
+.back-to-top.show { opacity: 1; visibility: visible; transform: translateY(0); }
+.back-to-top:active { transform: scale(.94); }
+.back-to-top svg { display: block; }

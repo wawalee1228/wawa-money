@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v57-acctcard';
+const APP_VERSION = 'v58-backtotop';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -75,3 +75,21 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch((e) => console.warn('[Wawa] SW 未註冊：', e.message));
   });
 }
+
+// 回到頂部浮動鈕（通用元件，建立一次、全頁共用；捲動容器＝window）。
+// 任一頁捲過 ~400px 才淡入、回頂時淡出；點一下平滑捲回頂端。純前端 UI，不碰資料。
+(function backToTop() {
+  const btn = document.createElement('button');
+  btn.className = 'back-to-top';
+  btn.setAttribute('aria-label', '回到頂部');
+  btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+  document.body.appendChild(btn);
+  const SHOW_AT = 400;
+  const onScroll = () => {
+    const y = window.scrollY || document.documentElement.scrollTop || 0;
+    btn.classList.toggle('show', y > SHOW_AT);
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  btn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+  onScroll();
+})();
