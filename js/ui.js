@@ -1986,6 +1986,7 @@ async function hardDeleteMany(ids) {
 // ---------------------------------------------------------------- 設定
 export async function renderSettings(view) {
   const accounts = (await db.getAll('accounts')).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  const allTxns = await db.getAll('transactions'); // 帳戶卡顯示「目前餘額」即時計算用
   const cards = await db.getAll('cards');
   const categories = await db.metaGet('categories', []);
   const partyTags = await db.metaGet('party_tags', []);
@@ -2000,22 +2001,39 @@ export async function renderSettings(view) {
     <div class="sort-list" data-sort="accts"></div></section>`);
   const acctList = acctCard.querySelector('.sort-list');
   accounts.forEach((a) => {
+    const bal = Math.round(accountBalance(a, allTxns));
     const box = el(`<div class="acct-edit" data-key="${a.id}">
       <div class="head"><span style="display:flex;gap:8px;align-items:center"><span class="drag-handle" title="拖曳排序">≡</span><span class="nm">${a.name}</span></span>
         <span class="owner-tag">${OWNER_LABEL[a.owner] || ''}・${TYPE_LABEL[a.type] || a.type}</span></div>
-      <label class="field"><span class="lab">名稱</span><input data-f="name" value="${a.name}" /></label>
-      <label class="field"><span class="lab">期初餘額</span><input data-f="opening_balance" type="number" inputmode="numeric" value="${a.opening_balance || 0}" /></label>
-      <label class="inline-check field"><input data-f="include_in_total" type="checkbox" ${a.include_in_total ? 'checked' : ''}/> <span>算進總資產</span></label>
-      <label class="inline-check field"><input data-f="archived" type="checkbox" ${a.archived ? 'checked' : ''}/> <span>封存（不再使用）</span></label>
-      <button class="btn sm" data-save>儲存這個帳戶</button>
-      <div class="field" style="border-top:1px dashed var(--line);padding-top:8px;margin-top:6px">
+      <div class="sub" style="margin-top:2px">期初 ${money(a.opening_balance || 0)}（6/10 校準）　<span data-adv style="cursor:pointer;color:var(--gold-d);text-decoration:underline">⚙ 進階</span></div>
+
+      <div style="font-family:var(--serif);font-size:22px;font-weight:700;margin:8px 0 0">目前餘額 <span class="amt ${bal < 0 ? 'neg' : ''}">${money(bal)}</span></div>
+      <div class="note" style="margin:0 0 8px">程式即時計算（期初 ＋ 6/11 起非歷史淨額）</div>
+
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px;background:#FBFAF6">
         <span class="lab">校正餘額（對帳 §8）</span>
-        <span style="display:flex;gap:6px;align-items:center">
-          <input data-f="actual" type="number" inputmode="numeric" placeholder="輸入實際餘額" style="max-width:130px"/>
-          <button class="btn sm ghost" data-reconcile>校正</button>
+        <div class="note" style="margin:2px 0 0">程式目前 <b>${money(bal)}</b>。與銀行／現金實際不符時，填實際值按「校正」，差額自動歸呆帳。</div>
+        <span style="display:flex;gap:6px;align-items:center;margin-top:8px">
+          <input data-f="actual" type="number" inputmode="numeric" placeholder="輸入實際餘額" style="max-width:140px"/>
+          <button class="btn sm" data-reconcile>校正</button>
         </span>
       </div>
+
+      <label class="inline-check field" style="margin-top:8px"><input data-f="include_in_total" type="checkbox" ${a.include_in_total ? 'checked' : ''}/> <span>算進總資產</span></label>
+      <label class="inline-check field"><input data-f="archived" type="checkbox" ${a.archived ? 'checked' : ''}/> <span>封存（不再使用）</span></label>
+      <button class="btn sm" data-save>儲存這個帳戶</button>
+
+      <div data-advbox style="display:none;border-top:1px dashed var(--line);padding-top:10px;margin-top:10px">
+        <div class="note">⚠ 期初餘額是帳目地基（已於 6/10 校準）。平常對帳請用上面的「校正餘額」；只有要重設地基才改這裡，會再確認一次以免手滑誤改。</div>
+        <label class="field"><span class="lab">帳戶名稱</span><input data-f="name" value="${a.name}" /></label>
+        <label class="field"><span class="lab">期初餘額</span><input data-f="opening_balance" type="number" inputmode="numeric" value="${a.opening_balance || 0}" /></label>
+        <button class="btn sm ghost" data-saveadv>修改名稱／期初（需確認）</button>
+      </div>
     </div>`);
+    box.querySelector('[data-adv]').addEventListener('click', () => {
+      const ab = box.querySelector('[data-advbox]');
+      ab.style.display = ab.style.display === 'none' ? '' : 'none';
+    });
     box.querySelector('[data-reconcile]').addEventListener('click', async () => {
       const raw = box.querySelector('[data-f="actual"]').value.trim();
       if (raw === '') { alert('請先輸入這個帳戶的實際餘額。'); return; }
@@ -2043,16 +2061,28 @@ export async function renderSettings(view) {
       alert(`已校正：「${a.name}」現在餘額 = ${money(actual)}（新增呆帳 ${money(diff)}）。`);
       navigate('settings');
     });
+    // 主儲存：只動「算進總資產／封存」（期初與名稱移到進階，避免手滑誤改期初）
     box.querySelector('[data-save]').addEventListener('click', async () => {
       const before = { ...a };
-      a.name = box.querySelector('[data-f="name"]').value.trim() || a.name;
-      a.opening_balance = Number(box.querySelector('[data-f="opening_balance"]').value || 0);
       a.include_in_total = box.querySelector('[data-f="include_in_total"]').checked;
       a.archived = box.querySelector('[data-f="archived"]').checked;
       await db.put('accounts', a);
-      await db.logChange({ ts: nowISO(), entity: 'accounts', entity_id: a.id, action: 'update', before, after: { ...a }, note: '設定區手動修改' });
+      await db.logChange({ ts: nowISO(), entity: 'accounts', entity_id: a.id, action: 'update', before, after: { ...a }, note: '設定區修改（算進總資產／封存）' });
       const btn = box.querySelector('[data-save]'); btn.textContent = '已儲存 ✓';
       setTimeout(() => { btn.textContent = '儲存這個帳戶'; }, 1500);
+    });
+    // 進階儲存：改名稱／期初；期初有變動 → 二次確認才寫入（期初是帳目地基）
+    box.querySelector('[data-saveadv]').addEventListener('click', async () => {
+      const newName = box.querySelector('[data-f="name"]').value.trim() || a.name;
+      const newOpen = Number(box.querySelector('[data-f="opening_balance"]').value || 0);
+      const openChanged = newOpen !== Number(a.opening_balance || 0);
+      if (openChanged && !confirm(`確定要把「${a.name}」的期初餘額從 ${money(a.opening_balance || 0)} 改成 ${money(newOpen)}？\n\n期初是帳目地基，改了會直接影響上面的「目前餘額」。平常對帳請用「校正餘額」，不要動這裡。確定修改？`)) return;
+      const before = { ...a };
+      a.name = newName;
+      a.opening_balance = newOpen;
+      await db.put('accounts', a);
+      await db.logChange({ ts: nowISO(), entity: 'accounts', entity_id: a.id, action: 'update', before, after: { ...a }, note: openChanged ? '進階：修改期初餘額（二次確認）' : '進階：修改帳戶名稱' });
+      navigate('settings');
     });
     acctList.appendChild(box);
   });

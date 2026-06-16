@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v56-terms';
+const APP_VERSION = 'v57-acctcard';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
