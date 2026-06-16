@@ -204,6 +204,7 @@ export async function renderOverview(view) {
             from_account_id: r.b.from_account_id || null, to_account_id: null,
             category_id: r.b.category_id ?? null, merchant: r.b.name,
             debt_id: r.b.debt_id || null, party_tag: '', vehicle_tag: '',
+            source_bill_id: r.b.id,   // 從帳單卡「記一筆」帶來；入帳成功後自動標本月已繳
           };
           clearEditing();
           navigate('entry');
@@ -673,6 +674,8 @@ export async function renderEntry(view) {
   if (editingId != null) rec = await db.get('transactions', editingId);
   const isEdit = !!rec;
   if (!isEdit && prefillDraft) { rec = prefillDraft; prefillDraft = null; } // 一次性消耗
+  // 從帳單卡「記一筆」帶來的來源帳單：入帳成功後自動把該帳單標記為本月已繳（編輯模式不適用）
+  const sourceBillId = (!isEdit && rec && rec.source_bill_id) || null;
 
   const acctOptions = (sel) => `<option value="">—請選擇—</option>` +
     accounts.map((a) => `<option value="${a.id}" ${String(sel) === String(a.id) ? 'selected' : ''}>${a.name}（${OWNER_LABEL[a.owner] || ''}）</option>`).join('');
@@ -867,6 +870,7 @@ export async function renderEntry(view) {
       related_txn_id: rec?.related_txn_id || null,
       locked_at: rec?.locked_at || null,
       debt_id: $('f_debt').value ? Number($('f_debt').value) : null,
+      source_bill_id: sourceBillId,   // 入帳成功後用來連動帳單「本月已繳」（buildRecord 不會寫進交易）
     };
   }
 
@@ -1042,6 +1046,19 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
         d.last_paid_at = ts;
         await db.put('debts', d);
         await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `繳款 ${money(record.amount)}（本金 ${record.principal_part != null ? money(record.principal_part) : '未拆'}${record.split_pending ? '・標待拆' : ''}）` });
+      }
+    }
+
+    // 帳單連動：從帳單卡「記一筆」且已確認入帳 → 自動把該帳單標記為「該月已繳」，總覽即時反映。
+    // 月份取交易日期所屬月（正常流程＝本月），與總覽 done_month 比對一致。
+    if (record.status === STATUS.CONFIRMED && f.source_bill_id) {
+      const bill = await db.get('bills', f.source_bill_id);
+      const billMonth = String(record.date || '').slice(0, 7);
+      if (bill && billMonth && bill.done_month !== billMonth) {
+        const before = { ...bill };
+        bill.done_month = billMonth;
+        await db.put('bills', bill);
+        await db.logChange({ ts, entity: 'bills', entity_id: bill.id, action: 'mark_paid', before, after: { ...bill }, note: `記一筆入帳後自動標記已繳（${billMonth}）` });
       }
     }
   }
