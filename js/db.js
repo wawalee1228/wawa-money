@@ -224,6 +224,26 @@ export async function ensureDefaults() {
   await backfillV20();
   await backfillV21();
   await backfillV22();
+  await backfillV23();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v23：把「呆帳 / 餘額校正」分類歸進 4 群 C（固定・剛性）。
+// v18 在既有資料庫建分類時 group4 為 null（有呆帳交易時報表落「未分類」孤兒），這裡補歸 C。
+// 與手續費(v22)同屬 §8 帳務/誤差調整。只動這一個分類的 group4；不碰其他分類/校正邏輯/交易/餘額。
+// ----------------------------------------------------------------------------
+export async function backfillV23() {
+  if (await metaGet('baddebt_group_v23', false)) return;
+  const cats = await metaGet('categories', []);
+  const bdId = await metaGet('baddebt_category_id', null);
+  const bd = cats.find((c) => String(c.id) === String(bdId)) || cats.find((c) => c.name && c.name.includes('呆帳'));
+  if (bd && bd.group4 !== 'C') {
+    const before = { group4: bd.group4 };
+    bd.group4 = 'C';
+    await metaSet('categories', cats);
+    await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: bd.id, action: 'update', before, after: { group4: 'C' }, note: '呆帳/餘額校正歸入 4 群 C（固定・剛性）' });
+  }
+  await metaSet('baddebt_group_v23', { id: bd ? bd.id : null, group4: 'C' });
 }
 
 // ----------------------------------------------------------------------------
@@ -415,7 +435,7 @@ export async function backfillV18() {
   if (!bd) {
     const usedIds = new Set(cats.map((c) => Number(c.id)));
     let nid = 13; while (usedIds.has(nid) || nid === 9) nid += 1; // 9 已退役、不重用
-    bd = { id: nid, name: '呆帳 / 餘額校正', group4: null, sort: 99 };
+    bd = { id: nid, name: '呆帳 / 餘額校正', group4: 'C', sort: 99 }; // 4 群歸 C（固定・剛性，§8 帳務/誤差調整）
     cats.push(bd);
     await metaSet('categories', cats);
     await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: bd.id, action: 'add', before: null, after: { ...bd }, note: '新增主分類「呆帳/餘額校正」（§8 對帳補差）' });
