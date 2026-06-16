@@ -515,7 +515,7 @@ async function renderReportInner(view) {
     breakTitle = '4 群佔比';
   } else {
     slices = rep.byCategory.map((x) => ({ label: x.name, amount: x.amount }));
-    breakTitle = `${categories.length} 類佔比`;
+    breakTitle = `${rep.byCategory.length} 類佔比`; // 只算本期有金額的分類，與下方列表項數一致（0 金額分類不列、不計）
   }
   slices.forEach((s, i) => { s.color = RPAL[i % RPAL.length]; });
   const totalExp = slices.reduce((s, x) => s + x.amount, 0);
@@ -599,7 +599,7 @@ async function renderReportInner(view) {
   // ---- 圓餅 ----
   const pieCard = el(`<section class="card"><h2>${breakTitle}</h2>
     ${(reportState.categoryId == null || isIncFilter) ? `<div class="seg" id="dimSeg" style="max-width:240px">
-      <button type="button" class="seg-btn ${reportState.dim === '12' ? 'on' : ''}" data-d="12">${categories.length} 類</button>
+      <button type="button" class="seg-btn ${reportState.dim === '12' ? 'on' : ''}" data-d="12">${rep.byCategory.length} 類</button>
       <button type="button" class="seg-btn ${reportState.dim === '4' ? 'on' : ''}" data-d="4">4 群</button></div>` : ''}
     <div class="pie-wrap">${pieSVG(slices)}</div>
     <div class="note" id="pieDetail">點圓餅或下方項目看金額與占比。</div>
