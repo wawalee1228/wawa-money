@@ -140,6 +140,19 @@ export async function renderOverview(view) {
     }
   }
 
+  // Part 4：計入總資產的帳戶若餘額為負 → 頂部溫和提示（多半是某筆繳款記錯來源），點擊跳明細篩該帳戶
+  {
+    const negAccts = active.filter((a) => a.include_in_total && !a.custody && a.type !== 'payment_tool' && accountBalance(a, txns) < 0);
+    for (const a of negAccts) {
+      const bal = accountBalance(a, txns);
+      const b = el(`<div class="todo-banner" style="background:#fef2f2;border-color:#fecaca;color:#b91c1c">
+        <span>⚠ 「${escapeHtml(a.name)}」餘額 <b style="color:#b91c1c">${money(bal)}</b>，可能有筆繳款記錯來源</span>
+        <button class="btn sm" data-negacct="${a.id}">點此查看</button></div>`);
+      b.querySelector('[data-negacct]').addEventListener('click', () => { listSearchKw = a.name; clearListAnchor(); navigate('list'); });
+      view.appendChild(b);
+    }
+  }
+
   view.appendChild(el(`<section class="card">
     <h2>總資產（即時計算）</h2>
     <div class="big-total ${assets < 0 ? 'neg' : ''}">${money(assets)}</div>
@@ -189,7 +202,7 @@ export async function renderOverview(view) {
         const row = el(`<div class="bill-row ${r.done ? 'done' : ''}">
           <input type="checkbox" class="bill-check" ${r.done ? 'checked' : ''}>
           <span class="bill-main"><span class="bill-name">${escapeHtml(r.b.name)}</span><br><span class="txn-sub">${when}・${money(r.b.amount)}</span></span>
-          ${r.done ? '' : '<button class="btn sm" data-pay>記一筆</button>'}
+          <button class="btn sm ${r.done ? 'ghost' : ''}" data-pay>記一筆</button>
         </div>`);
         row.querySelector('.bill-check').addEventListener('change', async (e) => {
           const before = { ...r.b };
@@ -199,6 +212,8 @@ export async function renderOverview(view) {
           navigate('overview');
         });
         row.querySelector('[data-pay]')?.addEventListener('click', () => {
+          // Part 3 防重複：本月已標已繳，再記一筆要再確認一次
+          if (r.done && !confirm(`「${r.b.name}」本月已標示繳過了，確定再記一筆？（避免重複記帳；若是上次記錯要改，建議去明細修正那一筆）`)) return;
           prefillDraft = {
             type: 'expense', date: todayStr(), amount: r.b.amount,
             from_account_id: r.b.from_account_id || null, to_account_id: null,
@@ -673,6 +688,14 @@ export async function renderEntry(view) {
   let rec = null;
   if (editingId != null) rec = await db.get('transactions', editingId);
   const isEdit = !!rec;
+
+  // Part 2 防呆：算各帳戶「現在餘額」，確認卡用來預估「扣這筆後會不會變負」。
+  // 編輯時排除這筆本身（避免自己扣自己重複計）；歷史交易不影響餘額故不警告。
+  const allTxnsForBal = await db.getAll('transactions');
+  const txnsForBal = isEdit ? allTxnsForBal.filter((t) => t.id !== editingId) : allTxnsForBal;
+  const balancesById = {};
+  for (const a of accounts) balancesById[a.id] = accountBalance(a, txnsForBal);
+  const skipNegCheck = !!(isEdit && rec && rec.historical); // 歷史不動餘額 → 不警告
   if (!isEdit && prefillDraft) { rec = prefillDraft; prefillDraft = null; } // 一次性消耗
   // 從帳單卡「記一筆」帶來的來源帳單：入帳成功後自動把該帳單標記為本月已繳（編輯模式不適用）
   const sourceBillId = (!isEdit && rec && rec.source_bill_id) || null;
@@ -900,7 +923,7 @@ export async function renderEntry(view) {
     const liveAsmp = {};
     if (assumptions.from_account_id && f.from_account_id) liveAsmp.from_account_id = assumptions.from_account_id;
     if (assumptions.to_account_id && f.to_account_id) liveAsmp.to_account_id = assumptions.to_account_id;
-    renderConfirmCard(confirmHost, f, issues, accounts, [...categories, ...incomeCats], isEdit, rec, liveAsmp, activeDebts);
+    renderConfirmCard(confirmHost, f, issues, accounts, [...categories, ...incomeCats], isEdit, rec, liveAsmp, activeDebts, skipNegCheck ? null : balancesById);
     confirmHost.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
@@ -908,7 +931,7 @@ export async function renderEntry(view) {
 }
 
 // 確認卡（§5、§6：顯示 日期＋星期幾＋地點＋項目＋金額＋付款來源；確認才寫入）
-function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, assumptions = {}, debts = []) {
+function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, assumptions = {}, debts = [], balancesById = null) {
   const acctName = (id) => accounts.find((a) => a.id === id)?.name || '（未選）';
   const catName = (id) => categories.find((c) => c.id === id)?.name || '（未分類）';
   const blocks = issues.filter((i) => i.level === 'block');
@@ -988,10 +1011,30 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     card.appendChild(el(`<div class="warnbox">${confirms.map((b) => '⚠ ' + b.text).join('<br>')}<br>來源判不準，不亂猜；可先存成「待確認」，之後補。</div>`));
   }
 
+  // Part 2：扣款後該帳戶會變負 → 紅字警告，需勾「確定從這個帳戶扣」才放行（一筆只扣一個帳戶一次）。
+  let negWarn = null;
+  if (balancesById && f.amount && (f.type === 'expense' || f.type === 'receivable' || f.type === 'transfer')) {
+    const fromA = accounts.find((a) => a.id === f.from_account_id);
+    if (fromA && fromA.type !== 'payment_tool') { // 信用卡（支付工具）非資產帳戶不在此防呆
+      const cur = Number(balancesById[fromA.id] ?? 0);
+      const after = cur - Number(f.amount);
+      if (after < 0) negWarn = { name: fromA.name, cur, after };
+    }
+  }
+
   const btns = el(`<div class="confirm-btns"></div>`);
   if (clean) {
     const ok = el(`<button class="btn">${isEdit ? '確認修正（上鎖）' : '確認入帳'}</button>`);
+    if (negWarn) {
+      card.appendChild(el(`<div class="warnbox" style="background:#fef2f2;border-color:#fecaca;color:#b91c1c">
+        ⚠ 此筆將使「${escapeHtml(negWarn.name)}」從 ${money(negWarn.cur)} 變 <b>${money(negWarn.after)}</b>，確定從這個帳戶扣？<br>
+        （如果這筆其實該從別的帳戶付，按「返回修改」改付款來源；別重複從兩個帳戶各記一次。）
+        <label class="inline-check" style="margin-top:8px"><input type="checkbox" id="negAck"> <span>我確定就是從「${escapeHtml(negWarn.name)}」扣這一筆</span></label></div>`));
+      ok.disabled = true;
+      card.querySelector('#negAck').addEventListener('change', (e) => { ok.disabled = !e.target.checked; });
+    }
     ok.addEventListener('click', () => {
+      if (ok.disabled) return;
       // 讀本利拆分輸入（有 splitBox 才有）；都空＝未拆 → 標待拆（不扣本金）
       const spP = card.querySelector('#sp_p'), spI = card.querySelector('#sp_i');
       if (spP || spI) {
