@@ -1050,6 +1050,32 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     });
   }
 
+  // ── 轉帳手續費自動辨識（§2.5；只往後新記的負債繳款，舊資料一律不動）──────────
+  // 使用者只輸入「實際扣款總額」；程式比對該負債月繳排程，差額自動歸手續費或標待確認。
+  delete f.fee; delete f.feeNote; // 每次重畫先清掉舊判定
+  if (debt && f.type === 'expense' && f.amount != null && f.amount !== '' && !isEdit) {
+    const sched = Number(debt.monthly_amount || 0);
+    const actual = Number(f.amount);
+    const diff = Math.round(actual - sched);
+    if (sched > 0 && diff !== 0) {
+      if (diff > 0 && diff <= 50) {
+        f.fee = { amount: diff, sched, actual };
+        card.appendChild(el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244">
+          💳 偵測到<b>轉帳手續費 ${money(diff)}</b>（實際 ${money(actual)} − 月繳 ${money(sched)}）。<br>
+          入帳會拆成「繳款 ${money(sched)}」＋「手續費 ${money(diff)}」兩筆：餘額共扣 ${money(actual)}；
+          本金／期數一律按月繳 ${money(sched)} 算，手續費只扣餘額、不還本金；手續費扣款帳戶＝這筆來源帳戶。</div>`));
+      } else {
+        const more = diff > 0;
+        f.feeNote = more
+          ? `待確認：實際${actual} − 月繳${sched} = 多${diff}（>$50，手續費／延遲金／其他？）`
+          : `待確認：實際${actual} 比月繳${sched} 少${-diff}，請確認原因`;
+        card.appendChild(el(`<div class="warnbox" style="background:#FBF3E2;border-color:#E7D6A8;color:#7A5B17">
+          ⚠ 實際 ${money(actual)} 與月繳 ${money(sched)} 差 ${money(diff)}${more ? '（超過 $50）' : '（金額偏少）'}：
+          ${more ? '是手續費／延遲金／其他？不自動猜。' : '請確認原因。'}入帳會照<b>實際金額 ${money(actual)}</b> 記、並在備註標「待確認」，請事後到明細確認分類。</div>`));
+      }
+    }
+  }
+
   // 段5-1：預設帶入的帳戶 → 在確認卡顯眼提示「我填了 X，對嗎？」（一眼確認）
   const asmpMsg = (f.type === 'income' || f.type === 'transfer') ? assumptions.to_account_id : assumptions.from_account_id;
   if (asmpMsg) {
@@ -1094,6 +1120,14 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
         f.principal_part = f.interest_only ? 0 : (spP && spP.value !== '' ? Number(spP.value) : null);
         f.interest_part = spI && spI.value !== '' ? Number(spI.value) : null;
         f.split_pending = (!f.interest_only && f.principal_part == null && debt && debt.remaining_principal != null);
+      }
+      // 轉帳手續費（≤$50）：本筆繳款金額改為「月繳排程」，手續費差額由 saveRecord 另記一筆。
+      // 本金/期數按月繳算（principal 上限封在月繳額），餘額仍以實際總額為準（=繳款+手續費）。
+      if (f.fee) {
+        f.amount = f.fee.sched;
+        if (f.principal_part != null) f.principal_part = Math.min(Number(f.principal_part), f.fee.sched);
+      } else if (f.feeNote) {
+        f.note = (f.note ? f.note + '｜' : '') + f.feeNote; // >$50 或負差 → 照實際金額記、備註標待確認
       }
       saveRecord(f, issues, isEdit, rec, { forceLocked: isEdit });
     });
@@ -1142,6 +1176,23 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
         await db.put('debts', d);
         await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `繳款 ${money(record.amount)}（本金 ${record.principal_part != null ? money(record.principal_part) : '未拆'}${record.split_pending ? '・標待拆' : ''}${record.interest_only ? '・只繳息不計期' : ''}）` });
       }
+    }
+
+    // 轉帳手續費：≤$50 的差額另記一筆「手續費」交易（category=轉帳手續費、不關聯負債 →
+    // 只影響餘額、不動本金/期數）；扣款帳戶＝繼承這筆繳款的來源帳戶（不可留空）。
+    if (record.status === STATUS.CONFIRMED && f.fee && Number(f.fee.amount) > 0 && record.from_account_id) {
+      const feeCatId = await db.metaGet('fee_category_id', null);
+      const feeRec = {
+        date: record.date, type: 'expense', amount: Number(f.fee.amount),
+        from_account_id: record.from_account_id, to_account_id: null,
+        category_id: feeCatId, debt_id: null, party_tag: '', vehicle_tag: '',
+        merchant: '轉帳手續費', note: `轉帳手續費（實際${f.fee.actual} − 月繳${f.fee.sched}）`,
+        status: 'confirmed', historical: false, is_fee: true, pending_reason: '',
+        invoice_no: null, screenshot_id: null, related_txn_id: id,
+        created_at: ts, updated_at: ts, locked_at: null,
+      };
+      const feeId = await db.add('transactions', feeRec);
+      await db.logChange({ ts, entity: 'transactions', entity_id: feeId, action: 'create', before: null, after: { ...feeRec, id: feeId }, note: `自動標轉帳手續費 ${money(feeRec.amount)}（繳款 #${id} 實際−月繳差額）` });
     }
 
     // 帳單連動：從帳單卡「記一筆」且已確認入帳 → 自動把該帳單標記為「該月已繳」，總覽即時反映。

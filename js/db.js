@@ -222,6 +222,27 @@ export async function ensureDefaults() {
   await backfillV18();
   await backfillV19();
   await backfillV20();
+  await backfillV21();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v21：新增主分類「轉帳手續費」（負債繳款自動標註手續費用）。
+// 只加分類＋記 id 到 meta.fee_category_id；不動任何既有交易（純結構）。
+// ----------------------------------------------------------------------------
+export async function backfillV21() {
+  if (await metaGet('fee_cat_v21', false)) return;
+  const cats = await metaGet('categories', []);
+  let fee = cats.find((c) => c.name && c.name.includes('手續費'));
+  if (!fee) {
+    const used = new Set(cats.map((c) => Number(c.id)));
+    let nid = 14; while (used.has(nid) || nid === 9) nid += 1; // 9 已退役、不重用
+    fee = { id: nid, name: '轉帳手續費', group4: null, sort: 98 };
+    cats.push(fee);
+    await metaSet('categories', cats);
+    await logChange({ ts: '2026-06-16', entity: 'categories', entity_id: fee.id, action: 'add', before: null, after: { ...fee }, note: '新增主分類「轉帳手續費」（負債繳款自動標註用）' });
+  }
+  await metaSet('fee_category_id', fee.id);
+  await metaSet('fee_cat_v21', { id: fee.id });
 }
 
 // ----------------------------------------------------------------------------

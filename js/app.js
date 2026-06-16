@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v59-billcollapse';
+const APP_VERSION = 'v60-txnfee';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -63,6 +63,7 @@ tabs.forEach((t) => t.addEventListener('click', () => {
     console.log('[Wawa] 呆帳分類 v18：', await metaGet('baddebt_cat_v18', null));
     console.log('[Wawa] 重鋪地基 v19：', await metaGet('balance_rebase_v19', null));
     console.log('[Wawa] 期數校正 v20：', await metaGet('debt_terms_v20', null));
+    console.log('[Wawa] 手續費分類 v21：', await metaGet('fee_cat_v21', null));
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;
