@@ -213,6 +213,35 @@ export function scanTransferAccounts(text, accounts, cards, defaults = {}) {
   return { from, to };
 }
 
+// ---- 段內「名目」抽取（§9 彈性增強）----
+// 位置不拘地抽出名目：移除金額/幣別、來源關鍵字、人稱、前綴動詞後剩下的本體。
+// 例：「現金早餐$100」→「早餐」；「早餐現金$100」→「早餐」；「兒子$100」→「」（純人稱無名目）。
+function scanSegItem(seg) {
+  let s = half(seg);
+  // 金額/幣別
+  s = s.replace(/(?:nt\$?|\$)\s*[\d,]+(?:\.\d+)?/gi, ' ').replace(/[\d,]+(?:\.\d+)?\s*(?:元|塊)?/g, ' ');
+  // 來源關鍵字（長詞先移，避免殘字）
+  ['line\\s*pay\\s*money', 'line\\s*pay', '中國信託', '一卡通', 'ipass', '中信', '玉山', '郵局', '現金', '錢包', '帳戶', '簽帳', '刷卡', '末四碼'].forEach((w) => {
+    s = s.replace(new RegExp(w, 'gi'), ' ');
+  });
+  // 人稱（對象另記，不進名目）
+  s = s.replace(/(我|自己|兒子|哥哥|妹妹|女兒|孩子|先生|老公)/g, ' ');
+  // 前綴動詞/連接詞
+  s = s.replace(/(繳費|繳|付款|付|刷|花|買|領|存|儲值|轉帳|轉|匯|拿|用|的|和|跟|給|了)/g, ' ');
+  return s.replace(/[.、，,＋+]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// 一段裡出現幾個「不同的銀行/現金來源」（LINE Pay 刷某卡屬合理組合，不算衝突）。
+function distinctBankTokens(seg) {
+  const set = new Set();
+  if (/中國信託|中信/.test(seg)) set.add('中信');
+  if (/玉山/.test(seg)) set.add('玉山');
+  if (/郵局/.test(seg)) set.add('郵局');
+  if (/現金/.test(seg)) set.add('現金');
+  if (/一卡通|ipass/i.test(seg)) set.add('一卡通');
+  return set;
+}
+
 // ---- 一行多筆拆分（批次輸入用）----
 // 觸發：一行裡有多個「名目＋金額」段，用 ＋/+/、/，分隔 → 拆成多筆「支出」草稿。
 // 規則：日期＝該行日期；對象標籤 我→Wawa 個人、兒子/哥哥/妹妹→孩子、先生→先生；
@@ -247,7 +276,7 @@ export function splitMultiExpense(text, ctx, base = new Date()) {
   // —— 冒號前綴＝套用到後面整串 ——
   // 「前綴：內容」（全形：或半形: 皆可）：前綴的付款來源 → 冒號後每一筆的共同來源。
   // 前綴本身不是一筆；某段自己寫了來源則以自己的為準；判不準照舊留空待確認。
-  let prefixSrc = null, prefixNote = '';
+  let prefixSrc = null, prefixNote = '', prefixItem = '';
   // 行情境文字：｜分段的「名目」部分（最後一段以外）＋冒號前綴。
   // 用來做第二優先的分類預設（如 每天固定支出/平日開銷 → 生活支出）。
   let contextText = parts.slice(0, -1).join(' ');
@@ -259,6 +288,8 @@ export function splitMultiExpense(text, ctx, base = new Date()) {
     contextText += ' ' + pre;
     const psrc = scanSource(pre, accounts, cards, defaults);
     content = cm[2].trim();
+    // 冒號前綴混了「名目＋來源」（如「早餐 現金」）→ 抓出名目（早餐），併為冒號後第一筆的名目
+    prefixItem = scanSegItem(pre);
     if (psrc.id) {
       prefixSrc = psrc;
       prefixNote = `前綴「${pre}」→ 後面每筆的共同付款來源：${psrc.reason}${psrc.assumed ? '（預設帶，請核對）' : ''}`;
@@ -281,7 +312,14 @@ export function splitMultiExpense(text, ctx, base = new Date()) {
       : /(我|自己)/.test(seg) ? 'Wawa 個人' : '';
     // 付款來源：該段自己寫了 → 以自己的為準（含「判不準→留空」也照舊，不吃前綴）；
     //           沒寫 → 繼承前綴共同來源；連前綴都沒有 → 留空待確認。
-    const src = scanSource(seg, accounts, cards, defaults);
+    // 鐵則：一段出現兩個以上來源 → 待確認、不亂猜、不吃前綴
+    const bankSet = distinctBankTokens(seg);
+    const src = bankSet.size >= 2
+      ? { id: null, reason: `這段出現兩個以上付款來源（${[...bankSet].join('、')}），分不出 → 待確認` }
+      : scanSource(seg, accounts, cards, defaults);
+    // 名目（位置不拘）：段自己抽到的優先；第一筆若沒名目 → 用冒號前綴抽出的名目（早餐 現金：→ 早餐）
+    let item = scanSegItem(seg);
+    if (!item && items.length === 0 && prefixItem) item = prefixItem;
     // 分類預設（仍走確認卡可改），優先序高→低：
     //   0) 行尾分類欄（欄位優先）  1) 段落自己的名目關鍵字
     //   2) 行情境字（每天固定支出/平日開銷…→生活）  3) 純人稱＋金額 → 生活支出
@@ -323,6 +361,7 @@ export function splitMultiExpense(text, ctx, base = new Date()) {
 
     const notes = [
       ...(prefixNote ? [prefixNote] : []),
+      item ? `名目：${item}` : '名目：（判不出，留空）',
       `對象標籤：${party || '（判不出，留空）'}`,
       srcNote,
       category_id != null ? `分類：${catWhy}（建議，可改）` : '分類：判不準 → 留空待選',
@@ -330,7 +369,7 @@ export function splitMultiExpense(text, ctx, base = new Date()) {
     items.push({
       seg,
       draft: {
-        type: 'expense', date, amount: a.amount, merchant: '',
+        type: 'expense', date, amount: a.amount, merchant: item,
         from_account_id, to_account_id: null,
         category_id, party_tag: party, vehicle_tag: '',
       },
