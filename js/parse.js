@@ -49,7 +49,7 @@ function pad(y, mo, d) { const p = (x) => String(x).padStart(2, '0'); return `${
 
 // ---- 金額：抓帶幣別記號者優先；多個或零個 → 留空（不猜）----
 export function scanAmount(text) {
-  let s = half(text);
+  let s = half(text).replace(/＄/g, '$'); // 全形錢號 ＄ → 半形 $（容錯）
   // 先移除會被誤當金額的數字：日期、發票號、末四碼、卡號、時間、店名數字(7-11)
   s = s.replace(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g, ' ')   // YYYY-MM-DD
        .replace(/[A-Za-z]{2}-?\d{8}/g, ' ')               // 發票號 AB12345678
@@ -75,10 +75,12 @@ export function scanAmount(text) {
     while ((m = re3.exec(s))) { const v = num(m[1]); if (v >= 1) bare.push(v); }
     candidates = bare;
   }
-  const uniq = [...new Set(candidates.filter((x) => x != null && x > 0))];
-  if (uniq.length === 1) return { amount: uniq[0], multiple: false };
-  if (uniq.length > 1) return { amount: null, multiple: true, found: uniq };
-  return { amount: null, multiple: false };
+  const counted = candidates.filter((x) => x != null && x > 0);
+  const uniq = [...new Set(counted)];
+  const count = counted.length; // 金額「出現次數」（未去重）：同額多筆（$100、$100）也算 2
+  if (uniq.length === 1) return { amount: uniq[0], multiple: false, count };
+  if (uniq.length > 1) return { amount: null, multiple: true, found: uniq, count };
+  return { amount: null, multiple: false, count: 0 };
 }
 function num(s) { const v = Number(String(s).replace(/,/g, '')); return isNaN(v) ? null : v; }
 
@@ -217,7 +219,7 @@ export function scanTransferAccounts(text, accounts, cards, defaults = {}) {
 // 位置不拘地抽出名目：移除金額/幣別、來源關鍵字、人稱、前綴動詞後剩下的本體。
 // 例：「現金早餐$100」→「早餐」；「早餐現金$100」→「早餐」；「兒子$100」→「」（純人稱無名目）。
 function scanSegItem(seg) {
-  let s = half(seg);
+  let s = half(seg).replace(/＄/g, '$'); // 全形錢號 ＄ → 半形 $（容錯）
   // 金額/幣別
   s = s.replace(/(?:nt\$?|\$)\s*[\d,]+(?:\.\d+)?/gi, ' ').replace(/[\d,]+(?:\.\d+)?\s*(?:元|塊)?/g, ' ');
   // 來源關鍵字（長詞先移，避免殘字）
@@ -228,7 +230,7 @@ function scanSegItem(seg) {
   s = s.replace(/(我|自己|兒子|哥哥|妹妹|女兒|孩子|先生|老公)/g, ' ');
   // 前綴動詞/連接詞
   s = s.replace(/(繳費|繳|付款|付|刷|花|買|領|存|儲值|轉帳|轉|匯|拿|用|的|和|跟|給|了)/g, ' ');
-  return s.replace(/[.、，,＋+]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.replace(/[.、，,＋+$]/g, ' ').replace(/\s+/g, ' ').trim(); // 清掉分隔符與殘留錢號
 }
 
 // 一段裡出現幾個「不同的銀行/現金來源」（LINE Pay 刷某卡屬合理組合，不算衝突）。
@@ -390,6 +392,10 @@ export function classifyLine(text, knownStores = []) {
   }
   const amt = scanAmount(forAmt);
   if (amt.multiple) return { skip: true, multi: true, reason: `這行有多個金額（${amt.found.join('、')}），可能是多筆 → 請分行（之後用每日一鍵）` };
+  // 同額多筆：金額去重後只剩 1，但實際出現 ≥2 次、且有 ＋/、/， 分隔 → 也是多筆（如「早餐 現金：$100、兒子$100」）
+  if (amt.count >= 2 && /[＋+、，,]/.test(t)) {
+    return { skip: true, multi: true, reason: '這行用 ＋/、/， 分隔、且偵測到多筆金額（含同額）→ 自動拆多筆' };
+  }
   if (amt.amount == null) return { skip: true, reason: '沒抓到金額 → 可能不是交易，已跳過（沒幫你記）' };
   if (/(沒|未|別|沒有|沒能|不用|取消)\s*(拿|領|花|買|付|繳|刷|給|收|消費|儲值|轉)/.test(t)) {
     return { skip: true, reason: '看起來在說「沒發生」→ 跳過，沒幫你記（不對請手動記）' };
