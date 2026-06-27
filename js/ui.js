@@ -4,7 +4,7 @@
 // 介面以「越簡單越好」為原則（§15）。
 // ============================================================================
 import * as db from './db.js';
-import { allBalances, totalAssets, custodyTotal, netWorth, accountBalance, debtValidPaymentCount, debtRemainingTerms } from './calc.js';
+import { allBalances, totalAssets, custodyTotal, netWorth, accountBalance, debtValidPaymentCount, debtRemainingTerms, scanLedgerHealth } from './calc.js';
 import { runSelfTests } from './selftest.js';
 import { todayStr, formatWithWeekday, weekdayZh, parseRelativeDate, daysBetween } from './date.js';
 import { STATUS, STATUS_LABEL, isProtected, findIssues, canConfirm, buildRecord } from './txns.js';
@@ -103,7 +103,7 @@ async function recomputeDebtTerms(debtIds) {
       const before = d.remaining_terms;
       d.remaining_terms = nv;
       await db.put('debts', d);
-      await db.logChange({ ts: nowISO(), entity: 'debts', entity_id: d.id, action: 'recompute_terms', before: { remaining_terms: before }, after: { remaining_terms: nv }, note: `期數重算＝起點 ${d.terms_baseline} − 有效繳款 ${debtValidPaymentCount(d.id, txns)}` });
+      await db.logChange({ ts: nowISO(), entity: 'debts', entity_id: d.id, action: 'recompute_terms', before: { remaining_terms: before }, after: { remaining_terms: nv }, note: `期數重算＝起點 ${d.terms_baseline} − 有效繳款 ${debtValidPaymentCount(d.id, txns, d.group)}` });
     }
   }
 }
@@ -237,7 +237,7 @@ export async function renderOverview(view) {
             type: 'expense', date: todayStr(), amount: r.b.amount,
             from_account_id: r.b.from_account_id || null, to_account_id: null,
             category_id: r.b.category_id ?? null, merchant: r.b.name,
-            debt_id: r.b.debt_id || null, party_tag: '', vehicle_tag: '',
+            debt_id: r.b.debt_id || null, debt_group: r.b.debt_group || null, party_tag: '', vehicle_tag: '',
             source_bill_id: r.b.id,   // 從帳單卡「記一筆」帶來；入帳成功後自動標本月已繳
           };
           clearEditing();
@@ -804,7 +804,11 @@ export async function renderEntry(view) {
 
     <label class="field"><span class="lab">關聯負債（繳貸款時選；本金會跟著遞減）</span>
       <select id="f_debt"><option value="">—無—</option>
-      ${activeDebts.map((d) => `<option value="${d.id}" ${String(rec?.debt_id) === String(d.id) ? 'selected' : ''}>${escapeHtml(d.name)}（月付 ${money(d.monthly_amount)}）</option>`).join('')}</select></label>
+      ${[...new Set(activeDebts.filter((d) => d.group).map((d) => d.group))]
+        .map((g) => ({ group: g, segs: activeDebts.filter((d) => d.group === g) }))
+        .filter((x) => x.segs.length >= 2)
+        .map((x) => `<option value="g:${escapeHtml(x.group)}" ${rec?.debt_group === x.group ? 'selected' : ''}>${escapeHtml(x.group)}（${x.segs.length} 段合一・月付合計 ${money(x.segs.reduce((s, d) => s + Number(d.monthly_amount || 0), 0))}）</option>`).join('')}
+      ${activeDebts.map((d) => `<option value="${d.id}" ${!rec?.debt_group && String(rec?.debt_id) === String(d.id) ? 'selected' : ''}>${escapeHtml(d.name)}（月付 ${money(d.monthly_amount)}）</option>`).join('')}</select></label>
 
     <div class="row">
       <label class="field"><span class="lab">對象標籤</span><select id="f_party">${tagOptions(partyTags, rec?.party_tag)}</select></label>
@@ -933,7 +937,9 @@ export async function renderEntry(view) {
       screenshot_id: rec?.screenshot_id || null,
       related_txn_id: rec?.related_txn_id || null,
       locked_at: rec?.locked_at || null,
-      debt_id: $('f_debt').value ? Number($('f_debt').value) : null,
+      // f_debt 值：「g:群名」＝三段合一群組繳款；數字＝單一負債
+      debt_id: ($('f_debt').value && !$('f_debt').value.startsWith('g:')) ? Number($('f_debt').value) : null,
+      debt_group: $('f_debt').value.startsWith('g:') ? $('f_debt').value.slice(2) : null,
       source_bill_id: sourceBillId,   // 入帳成功後用來連動帳單「本月已繳」（buildRecord 不會寫進交易）
     };
   }
@@ -1055,9 +1061,52 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     });
   }
 
+  // ── 群組合一繳款（例：遠東房貸三段）：一筆繳款分攤到各段，各段本利拆分、各段本金各自遞減、各段期數各自 −1 ──
+  // 帳戶只扣「實際金額」一次（單一交易）→ 不會雙重扣款。多繳的差額＝溢繳，不還本金（§2.5）。
+  const groupSegs = (f.debt_group && f.type === 'expense' && f.amount)
+    ? debts.filter((d) => d.status === 'active' && d.group === f.debt_group) : [];
+  if (groupSegs.length >= 2) {
+    const actual = Number(f.amount);
+    const schedTotal = groupSegs.reduce((s, d) => s + Number(d.monthly_amount || 0), 0);
+    const ratio = (actual < schedTotal && schedTotal > 0) ? actual / schedTotal : 1; // 繳不足 → 等比例縮放、不超繳本金
+    const under = actual < schedTotal - 0.5;
+    const over = Math.round(actual - schedTotal);
+    // 各段本利估算（利率/本金未知的段 → 全列利息、本金 0，不誤扣本金）
+    const segCalc = groupSegs.map((d) => {
+      const m = Number(d.monthly_amount || 0) * ratio;
+      let i, p;
+      if (d.rate != null && d.remaining_principal != null) {
+        i = Math.min(Math.max(0, Math.round(Number(d.remaining_principal) * Number(d.rate) / 100 / 12)), Math.round(m));
+        p = Math.max(0, Math.round(m) - i);
+      } else { i = Math.round(m); p = 0; }
+      return { d, i, p };
+    });
+    const rows = segCalc.map(({ d, i, p }) => {
+      const cur = d.remaining_terms;
+      const termTxt = (cur != null) ? `期數 ${cur} → ${Math.max(0, cur - 1)}` : '未追蹤期數';
+      return `<div class="row" style="margin-top:8px;align-items:flex-end">
+        <label class="field" style="margin:0;flex:1.4"><span class="lab">${escapeHtml(d.name)}<br><span style="font-weight:400;font-size:11px">月付 ${money(d.monthly_amount)}・${termTxt}</span></span></label>
+        <label class="field" style="margin:0"><span class="lab">本金</span><input class="gsp_p" data-debt="${d.id}" type="number" inputmode="numeric" value="${p}"></label>
+        <label class="field" style="margin:0"><span class="lab">利息</span><input class="gsp_i" data-debt="${d.id}" type="number" inputmode="numeric" value="${i}"></label>
+      </div>`;
+    }).join('');
+    const note = under
+      ? `⚠ 實繳 ${money(actual)} <b>少於</b>排程合計 ${money(schedTotal)}：已按比例縮放各段、不超扣本金，並標「待確認」，請事後核對。`
+      : (over > 0
+        ? `實繳 ${money(actual)} − 排程合計 ${money(schedTotal)} = <b>溢繳 ${money(over)}</b>：溢繳<b>不還本金</b>（§2.5），只是離開總資產（留在遠東扣款帳戶）。`
+        : `實繳 ${money(actual)} ＝排程合計 ${money(schedTotal)}：剛好，無溢繳。`);
+    const gbox = el(`<div class="warnbox" style="background:#F4F6F1;border-color:#DEE5D8;color:#3D5244" id="groupSplitBox">
+      <b>繳「${escapeHtml(f.debt_group)}」三段合一 — 各段本利拆分</b><br>
+      <span style="font-size:12.5px">各段依「本金 × 年利率 ÷ 12」估利息（可手動改）。帳戶只扣實際 ${money(actual)} 一次；各段本金分別遞減、各段期數各自 −1。</span>
+      ${rows}
+      <div style="font-size:12px;margin-top:8px">${note}</div></div>`);
+    card.appendChild(gbox);
+    if (under) f.feeNote = `待確認：實際${actual} 少於三段排程合計${schedTotal}，已按比例分攤`;
+  }
+
   // ── 轉帳手續費自動辨識（§2.5；只往後新記的負債繳款，舊資料一律不動）──────────
   // 使用者只輸入「實際扣款總額」；程式比對該負債月繳排程，差額自動歸手續費或標待確認。
-  delete f.fee; delete f.feeNote; // 每次重畫先清掉舊判定
+  delete f.fee; if (!groupSegs.length) delete f.feeNote; // 每次重畫先清掉舊判定（群組的 feeNote 上面已設）
   if (debt && f.type === 'expense' && f.amount != null && f.amount !== '' && !isEdit) {
     const sched = Number(debt.monthly_amount || 0);
     const actual = Number(f.amount);
@@ -1118,9 +1167,25 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
     }
     ok.addEventListener('click', () => {
       if (ok.disabled) return;
-      // 讀本利拆分輸入（有 splitBox 才有）；都空＝未拆 → 標待拆（不扣本金）
+      // 群組合一繳款：讀各段本利輸入 → 組 group_split；本金總和遞減各段、溢繳不還本金。
+      const gbox = card.querySelector('#groupSplitBox');
+      if (gbox) {
+        const split = [];
+        for (const r of gbox.querySelectorAll('.gsp_p')) {
+          const id = Number(r.dataset.debt);
+          const iEl = gbox.querySelector(`.gsp_i[data-debt="${id}"]`);
+          split.push({ debt_id: id, principal: r.value !== '' ? Number(r.value) : 0, interest: iEl && iEl.value !== '' ? Number(iEl.value) : 0 });
+        }
+        f.group_split = split;
+        f.principal_part = split.reduce((s, x) => s + Number(x.principal || 0), 0);
+        f.interest_part = split.reduce((s, x) => s + Number(x.interest || 0), 0);
+        f.overpay = Math.max(0, Math.round(Number(f.amount) - (f.principal_part + f.interest_part))); // 溢繳：不還本金
+        f.split_pending = false;
+        if (f.overpay > 0) f.note = (f.note ? f.note + '｜' : '') + `溢繳 ${money(f.overpay)}（不還本金）`;
+      }
+      // 讀本利拆分輸入（單一負債才有 splitBox）；都空＝未拆 → 標待拆（不扣本金）
       const spP = card.querySelector('#sp_p'), spI = card.querySelector('#sp_i'), spIO = card.querySelector('#sp_io');
-      if (spP || spI) {
+      if (!gbox && (spP || spI)) {
         f.interest_only = !!(spIO && spIO.checked); // 只繳息 → 不計入期數
         f.principal_part = f.interest_only ? 0 : (spP && spP.value !== '' ? Number(spP.value) : null);
         f.interest_part = spI && spI.value !== '' ? Number(spI.value) : null;
@@ -1167,6 +1232,22 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
   } else {
     const id = await db.add('transactions', record);
     await db.logChange({ ts, entity: 'transactions', entity_id: id, action: 'create', before: null, after: { ...record, id }, note: '新增交易' });
+
+    // §2.5 群組合一繳款（遠東三段）：單一交易、帳戶只扣一次；各段本金分別遞減。
+    // 期數由 recomputeDebtTerms 依「群組繳款也算各段一期」推導（見 calc.debtValidPaymentCount）。
+    if (record.status === STATUS.CONFIRMED && record.debt_group && Array.isArray(record.group_split)) {
+      for (const part of record.group_split) {
+        const d = await db.get('debts', part.debt_id);
+        if (!d || d.status !== 'active') continue;
+        const before = { ...d };
+        if (Number(part.principal || 0) > 0 && d.remaining_principal != null) {
+          d.remaining_principal = Math.max(0, Number(d.remaining_principal) - Number(part.principal));
+        }
+        d.last_paid_at = ts;
+        await db.put('debts', d);
+        await db.logChange({ ts, entity: 'debts', entity_id: d.id, action: 'debt_payment', before, after: { ...d }, note: `群組繳款「${record.debt_group}」分攤：本金 ${money(Number(part.principal || 0))}・利息 ${money(Number(part.interest || 0))}（總繳 ${money(record.amount)}${record.overpay ? `・含溢繳 ${money(record.overpay)}不還本金` : ''}）` });
+      }
+    }
 
     // §2.5 負債繳款本金遞減：只在「新增且已確認」時套用一次。
     // （期數不在這裡 −1：一律由下方 recomputeDebtTerms 以「起點 − 有效繳款數」推導，避免重複扣／刪不回補。）
@@ -1226,8 +1307,9 @@ async function saveRecord(f, issues, isEdit, rec, opts) {
   }
 
   // 期數重算（治本）：新增或修正都跑，涵蓋改來源/改負債/重新確認；同一筆不重複扣。
-  // 修正可能把繳款移到別的負債，故新舊負債都要重算。
-  await recomputeDebtTerms([rec && rec.debt_id, record.debt_id, f.debt_id]);
+  // 修正可能把繳款移到別的負債，故新舊負債都要重算。群組繳款 → 三段成員都要重算。
+  const groupMemberIds = Array.isArray(record.group_split) ? record.group_split.map((x) => x.debt_id) : [];
+  await recomputeDebtTerms([rec && rec.debt_id, record.debt_id, f.debt_id, ...groupMemberIds]);
 
   clearEditing();
   navigate('list');
@@ -2654,7 +2736,7 @@ function makeCollapsibleSections(container) {
 }
 
 // ---------------------------------------------------------------- 自我檢測
-export function renderSelfTest(view) {
+export async function renderSelfTest(view) {
   const r = runSelfTests();
   view.innerHTML = '';
   const back = el(`<button class="btn ghost" style="margin-bottom:12px">← 回設定</button>`);
@@ -2671,4 +2753,21 @@ export function renderSelfTest(view) {
       <span class="res ${t.pass ? 'pass' : 'fail'}">${t.pass ? 'PASS' : 'FAIL'}</span></div>`));
   }
   view.appendChild(list);
+
+  // ── 帳本體檢（唯讀）：掃真實交易找重複扣款／跨帳戶重複，只讀不寫 ──
+  const txns = await db.getAll('transactions');
+  const findings = scanLedgerHealth(txns);
+  const health = el(`<section class="card"><h2>帳本體檢：重複扣款 / 帳目落差（唯讀）</h2>
+    <div class="note">只讀你真實的交易、不改任何資料。揪出「同一期繳款被兩個帳戶各記一次」「同負債同月重複繳款」等。點交易編號可去明細處理。</div></section>`);
+  if (!findings.length) {
+    health.appendChild(el(`<div class="big-total">未發現可疑重複 ✓</div>`));
+  } else {
+    health.appendChild(el(`<div class="big-total neg">發現 ${findings.length} 項待你確認</div>`));
+    for (const fnd of findings) {
+      health.appendChild(el(`<div class="warnbox" style="background:#FBF3E2;border-color:#E7D6A8;color:#7A5B17">
+        <b>⚠ ${escapeHtml(fnd.title)}</b><br><span style="font-size:12.5px">${escapeHtml(fnd.detail)}</span><br>
+        <span style="font-size:12px">交易編號：${fnd.txnIds.map((i) => '#' + i).join('、')}</span></div>`));
+    }
+  }
+  view.appendChild(health);
 }

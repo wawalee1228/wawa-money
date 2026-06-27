@@ -100,6 +100,11 @@ export function buildRecord(form, issues, nowISO, opts = {}) {
     related_txn_id: form.related_txn_id || null,
     // §2.5 負債繳款：關聯負債＋本利拆分（利率未知未拆 → split_pending 標待拆）
     debt_id: form.debt_id || null,
+    // 群組合一繳款（例：遠東房貸三段）：debt_group=群名、group_split=各段本利明細。
+    // debt_id 留空（不是單一負債）；帳戶只扣 amount 一次，本金各段在 saveRecord 分別遞減。
+    debt_group: form.debt_group || null,
+    group_split: Array.isArray(form.group_split) ? form.group_split : null,
+    overpay: form.overpay != null && form.overpay !== '' ? Number(form.overpay) : null, // 溢繳（不還本金）
     principal_part: form.principal_part != null && form.principal_part !== '' ? Number(form.principal_part) : null,
     interest_part: form.interest_part != null && form.interest_part !== '' ? Number(form.interest_part) : null,
     split_pending: !!form.split_pending,

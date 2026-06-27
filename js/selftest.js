@@ -3,7 +3,7 @@
 // 用「記憶體內的假資料」驗證計算引擎，完全不碰真實帳本，不寫入資料庫。
 // 目的：證明三種交易類型對總資產的影響正確、且餘額是「即時算」出來的。
 // ============================================================================
-import { accountBalance, totalAssets, custodyTotal, netWorth } from './calc.js';
+import { accountBalance, totalAssets, custodyTotal, netWorth, debtValidPaymentCount, debtRemainingTerms, scanLedgerHealth } from './calc.js';
 
 function makeFixture() {
   const accounts = [
@@ -145,6 +145,35 @@ export function runSelfTests() {
     const txns = [{ type: 'receivable', from_account_id: 2, amount: 3000, status: 'confirmed', historical: true, settled: true, settled_to_account_id: 2 }];
     T('歷史應收款收回沖銷：錢真的進來才入帳',
       eq(accountBalance(A[1], txns), 3500), `現金應 3500，得 ${accountBalance(A[1], txns)}`);
+  }
+
+  // §2.5 群組合一繳款（遠東三段）：一筆群組繳款 → 各段各算一期、帳戶只扣一次
+  {
+    const seg = (id) => ({ id, group: '遠東房貸', terms_baseline: 335, remaining_terms: 335 });
+    const groupPay = [{ id: 100, type: 'expense', status: 'confirmed', debt_id: null, debt_group: '遠東房貸', amount: 46500, from_account_id: 9 }];
+    T('群組繳款：各段期數各 −1（335→334）',
+      debtRemainingTerms(seg(1), groupPay) === 334 && debtRemainingTerms(seg(3), groupPay) === 334,
+      `三段應皆 334，得 ${debtRemainingTerms(seg(1), groupPay)}/${debtRemainingTerms(seg(3), groupPay)}`);
+    T('群組繳款：帳戶只扣一次（單一交易，不會雙重扣款）',
+      groupPay.filter((t) => t.type === 'expense').length === 1, `應 1 筆支出，得 ${groupPay.length}`);
+    T('群組繳款：不誤計到無關單一負債',
+      debtValidPaymentCount(5, groupPay, '') === 0, `應 0，得 ${debtValidPaymentCount(5, groupPay, '')}`);
+  }
+
+  // 帳本體檢：揪出重複扣款（同群組同月、同額跨帳戶）
+  {
+    const dup = [
+      { id: 1, type: 'expense', status: 'confirmed', debt_group: '遠東房貸', amount: 46500, from_account_id: 9, date: '2026-06-25' },
+      { id: 2, type: 'expense', status: 'confirmed', debt_group: '遠東房貸', amount: 46500, from_account_id: 9, date: '2026-06-26' },
+    ];
+    T('體檢：同群組同月重複繳款 → 揪出', scanLedgerHealth(dup).some((x) => x.title.includes('重複繳款')), `應揪出，得 ${scanLedgerHealth(dup).length} 項`);
+    const cross = [
+      { id: 1, type: 'expense', status: 'confirmed', amount: 17158, from_account_id: 9, date: '2026-06-25' },
+      { id: 2, type: 'expense', status: 'confirmed', amount: 17158, from_account_id: 3, date: '2026-06-26' },
+    ];
+    T('體檢：同額跨帳戶相近日 → 揪出（防雙重扣款）', scanLedgerHealth(cross).some((x) => x.title.includes('跨帳戶')), `應揪出，得 ${scanLedgerHealth(cross).length} 項`);
+    const clean = [{ id: 1, type: 'expense', status: 'confirmed', amount: 100, from_account_id: 9, date: '2026-06-01' }];
+    T('體檢：乾淨帳本不誤報', scanLedgerHealth(clean).length === 0, `應 0，得 ${scanLedgerHealth(clean).length}`);
   }
 
   const passed = results.filter((r) => r.pass).length;
