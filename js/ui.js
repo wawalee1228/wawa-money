@@ -310,6 +310,10 @@ export async function renderOverview(view) {
           <span class="amt neg">${money(gP)}</span></div>`);
         const body = el('<div style="display:none"></div>');
         for (const d of list) body.appendChild(debtRow(d, true));
+        // 期數估算提醒：有在追蹤期數但無權威總期數（terms_baseline 由攤還反推）→ 標明非精確、可校正。
+        if (list.some((d) => d.terms_baseline != null && d.total_terms == null)) {
+          body.appendChild(el(`<div class="kv" style="padding-left:18px"><span class="sub" style="color:#7A5B17">ℹ️ 期數起點為攤還估算值，待對帳單校正；設定區可隨時改。</span></div>`));
+        }
         head.addEventListener('click', () => {
           const open = body.style.display === 'none';
           body.style.display = open ? '' : 'none';
@@ -1099,7 +1103,8 @@ function renderConfirmCard(host, f, issues, accounts, categories, isEdit, rec, a
       <b>繳「${escapeHtml(f.debt_group)}」三段合一 — 各段本利拆分</b><br>
       <span style="font-size:12.5px">各段依「本金 × 年利率 ÷ 12」估利息（可手動改）。帳戶只扣實際 ${money(actual)} 一次；各段本金分別遞減、各段期數各自 −1。</span>
       ${rows}
-      <div style="font-size:12px;margin-top:8px">${note}</div></div>`);
+      <div style="font-size:12px;margin-top:8px">${note}</div>
+      ${groupSegs.some((d) => d.terms_baseline != null && d.total_terms == null) ? '<div style="font-size:11.5px;margin-top:6px;color:#7A5B17">ℹ️ 期數起點為攤還估算值，待遠東對帳單校正；設定區可隨時改，非精確值。</div>' : ''}</div>`);
     card.appendChild(gbox);
     if (under) f.feeNote = `待確認：實際${actual} 少於三段排程合計${schedTotal}，已按比例分攤`;
   }
