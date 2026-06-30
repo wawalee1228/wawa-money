@@ -225,6 +225,46 @@ export async function ensureDefaults() {
   await backfillV21();
   await backfillV22();
   await backfillV23();
+  await backfillV24();
+}
+
+// ----------------------------------------------------------------------------
+// 一次性 backfill v24：遠東房貸三段「開始追蹤期數」＋帳單接上群組（§2.5）。
+// (A) 三段 terms_baseline = 335（由各段剩餘本金/利率/月付以攤還公式反推，三段一致 → 同筆同時起貸）。
+//     335 = 本月扣款「之前」的剩餘期數；使用者之後記一筆本月群組繳款 → 三段各自 335 → 334。
+//     僅在尚未設 terms_baseline 時種（不覆寫使用者後續校正）。整數可能與遠東對帳單差一兩期，設定區可改。
+// (B) 「遠東房貸（三段合計）」帳單原 debt_id=null（記一筆不還本金）→ 補 debt_group='遠東房貸'，
+//     讓帳單「記一筆」自動帶入群組合一繳款。amount 校正為三段月付加總（治本：以實際月付為準）。
+// 只動 debts 的期數欄位與該帳單；不碰任何交易、不碰餘額（§最高原則1）。
+// ----------------------------------------------------------------------------
+export async function backfillV24() {
+  if (await metaGet('farEast_terms_v24', false)) return;
+  const TS = '2026-06-27';
+  const debts = await getAll('debts');
+  const seg = debts.filter((d) => (d.group || '') === '遠東房貸');
+  const report = [];
+  for (const d of seg) {
+    if (d.terms_baseline != null) { report.push({ name: d.name, skipped: '已有 baseline' }); continue; }
+    const before = { terms_baseline: d.terms_baseline ?? null, remaining_terms: d.remaining_terms ?? null };
+    d.terms_baseline = 335;
+    d.remaining_terms = 335;            // 本月繳款前；記一筆後由 recomputeDebtTerms 推導為 334
+    await put('debts', d);
+    await logChange({ ts: TS, entity: 'debts', entity_id: d.id, action: 'fix_terms', before, after: { terms_baseline: 335, remaining_terms: 335 }, note: '遠東三段開始追蹤期數，起點 335（攤還反推；對帳單可校正）v24' });
+    report.push({ name: d.name, baseline: 335 });
+  }
+  // (B) 帳單接群組 + 月付加總校正
+  const segSum = seg.reduce((s, d) => s + Number(d.monthly_amount || 0), 0); // 1079+28235+17158 = 46472
+  const bills = await getAll('bills');
+  const bill = bills.find((b) => (b.name || '').includes('遠東房貸'));
+  if (bill && (bill.debt_group == null || (segSum && bill.amount !== segSum))) {
+    const before = { debt_group: bill.debt_group ?? null, amount: bill.amount };
+    bill.debt_group = '遠東房貸';
+    if (segSum) bill.amount = segSum;
+    await put('bills', bill);
+    await logChange({ ts: TS, entity: 'bills', entity_id: bill.id, action: 'update', before, after: { debt_group: '遠東房貸', amount: bill.amount }, note: '遠東帳單接上三段群組合一繳款 v24' });
+  }
+  await metaSet('farEast_terms_v24', { report, segSum, ts: TS });
+  if (typeof console !== 'undefined') console.log('[Wawa] 遠東三段期數/群組 v24：', { report, segSum });
 }
 
 // ----------------------------------------------------------------------------
@@ -729,9 +769,9 @@ export async function backfillV9() {
   if ((await count('debts')) === 0) {
     const debts = [
       // 遠東房貸三段（group 合併顯示）
-      { name: '遠東房貸-0001', group: '遠東房貸', remaining_principal: 266297, rate: 2.31, monthly_amount: 1079, pay_day: 25, remaining_terms: null, total_terms: null, from_account_id: hCT, note: '', status: 'active' },
-      { name: '遠東房貸-0002', group: '遠東房貸', remaining_principal: 6935762, rate: 2.35, monthly_amount: 28235, pay_day: 25, remaining_terms: null, total_terms: null, from_account_id: hCT, note: '', status: 'active' },
-      { name: '遠東房貸-0003', group: '遠東房貸', remaining_principal: 4214735, rate: 2.35, monthly_amount: 17158, pay_day: 25, remaining_terms: null, total_terms: null, from_account_id: hCT, note: '', status: 'active' },
+      { name: '遠東房貸-0001', group: '遠東房貸', remaining_principal: 266297, rate: 2.31, monthly_amount: 1079, pay_day: 25, remaining_terms: 335, total_terms: null, terms_baseline: 335, from_account_id: hCT, note: '', status: 'active' },
+      { name: '遠東房貸-0002', group: '遠東房貸', remaining_principal: 6935762, rate: 2.35, monthly_amount: 28235, pay_day: 25, remaining_terms: 335, total_terms: null, terms_baseline: 335, from_account_id: hCT, note: '', status: 'active' },
+      { name: '遠東房貸-0003', group: '遠東房貸', remaining_principal: 4214735, rate: 2.35, monthly_amount: 17158, pay_day: 25, remaining_terms: 335, total_terms: null, terms_baseline: 335, from_account_id: hCT, note: '', status: 'active' },
       { name: '中信信貸', group: '', remaining_principal: 610000, rate: 15, monthly_amount: 12731, pay_day: 16, remaining_terms: 71, total_terms: 72, from_account_id: hCT, note: '72期 2026/5~2032/5（利率欄＝總費用年百分率15%）；首期2026/5/16已繳利息$2422', status: 'active' },
       { name: '恩沛AFTEE', group: '', remaining_principal: 1246, rate: null, monthly_amount: 1246, pay_day: 25, remaining_terms: 1, total_terms: null, from_account_id: wCT, note: '最後 1 期，6/25 前', status: 'active' },
       { name: '中租大Volvo', group: '', remaining_principal: null, rate: null, monthly_amount: 40400, pay_day: 7, remaining_terms: 46, total_terms: null, from_account_id: hCT, note: '本金待補', status: 'active' },
@@ -751,7 +791,7 @@ export async function backfillV9() {
       { name: '管理費', amount: 1600, pay_day: 10, from_account_id: cash, category_id: 1, debt_id: null, status: 'active', done_month: null },
       { name: '台新貸款', amount: 9950, pay_day: 15, from_account_id: hCT, category_id: 2, debt_id: debtId('台新'), status: 'active', done_month: null },
       { name: '中信信貸', amount: 12731, pay_day: 16, from_account_id: hCT, category_id: 2, debt_id: debtId('中信信貸'), status: 'active', done_month: null },
-      { name: '遠東房貸（三段合計）', amount: 46472, pay_day: 25, from_account_id: hCT, category_id: 2, debt_id: null, status: 'active', done_month: null },
+      { name: '遠東房貸（三段合計）', amount: 46472, pay_day: 25, from_account_id: hCT, category_id: 2, debt_id: null, debt_group: '遠東房貸', status: 'active', done_month: null },
       { name: '小Volvo新光', amount: 13000, pay_day: 29, from_account_id: hCT, category_id: 2, debt_id: debtId('新光'), status: 'active', done_month: null },
     ];
     for (const b of bills) await add('bills', b);

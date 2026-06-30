@@ -3,7 +3,7 @@
 // ============================================================================
 import { ensureSeeded, ensureDefaults, metaGet, getAll } from './db.js';
 
-const APP_VERSION = 'v67-samesum-multi';
+const APP_VERSION = 'v68-fareast-3seg';
 import {
   renderOverview, renderReport, renderCalc, renderEntry, renderBatch, renderReconcile, renderList, renderSettings, renderSelfTest,
   setNavigate, clearEditing, clearListAnchor,
@@ -31,7 +31,7 @@ async function show(name) {
   else if (name === 'reconcile') await renderReconcile(view);
   else if (name === 'list') await renderList(view);
   else if (name === 'settings') await renderSettings(view);
-  else if (name === 'selftest') renderSelfTest(view);
+  else if (name === 'selftest') await renderSelfTest(view);
 }
 
 setNavigate(show);
@@ -66,6 +66,7 @@ tabs.forEach((t) => t.addEventListener('click', () => {
     console.log('[Wawa] 手續費分類 v21：', await metaGet('fee_cat_v21', null));
     console.log('[Wawa] 手續費歸群 v22：', await metaGet('fee_group_v22', null));
     console.log('[Wawa] 呆帳歸群 v23：', await metaGet('baddebt_group_v23', null));
+    console.log('[Wawa] 遠東三段期數/群組 v24：', await metaGet('farEast_terms_v24', null));
     await show('overview');
   } catch (e) {
     view.innerHTML = `<section class="card"><h2>啟動失敗</h2><div class="note">${e && e.message ? e.message : e}</div></section>`;
